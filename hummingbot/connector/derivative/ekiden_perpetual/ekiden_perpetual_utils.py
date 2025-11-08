@@ -15,7 +15,7 @@ DEFAULT_FEES = TradeFeeSchema(
 
 CENTRALIZED = True
 
-EXAMPLE_PAIR = "BTC-USD"
+EXAMPLE_PAIR = "BTC-WUSDC"
 
 BROKER_ID = "HBOT"
 
@@ -34,7 +34,7 @@ class EkidenPerpetualConfigMap(BaseConnectorConfigMap):
     ekiden_perpetual_api_secret: SecretStr = Field(
         default=...,
         json_schema_extra={
-            "prompt": "Enter your Arbitrum wallet private key",
+            "prompt": "Enter your Aptos wallet private key",
             "is_secure": True,
             "is_connect_key": True,
             "prompt_on_new": True,
@@ -52,7 +52,7 @@ class EkidenPerpetualConfigMap(BaseConnectorConfigMap):
     ekiden_perpetual_api_key: SecretStr = Field(
         default=...,
         json_schema_extra={
-            "prompt": "Enter your Arbitrum or vault address",
+            "prompt": "Enter your Aptos or vault address",
             "is_secure": True,
             "is_connect_key": True,
             "prompt_on_new": True,
@@ -74,7 +74,7 @@ KEYS = EkidenPerpetualConfigMap.model_construct()
 
 OTHER_DOMAINS = ["ekiden_perpetual_testnet"]
 OTHER_DOMAINS_PARAMETER = {"ekiden_perpetual_testnet": "ekiden_perpetual_testnet"}
-OTHER_DOMAINS_EXAMPLE_PAIR = {"ekiden_perpetual_testnet": "BTC-USD"}
+OTHER_DOMAINS_EXAMPLE_PAIR = {"ekiden_perpetual_testnet": "BTC-WUSDC"}
 OTHER_DOMAINS_DEFAULT_FEES = {"ekiden_perpetual_testnet": [0, 0.025]}
 
 
@@ -83,7 +83,7 @@ class EkidenPerpetualTestnetConfigMap(BaseConnectorConfigMap):
     ekiden_perpetual_testnet_api_secret: SecretStr = Field(
         default=...,
         json_schema_extra={
-            "prompt": "Enter your Arbitrum wallet private key",
+            "prompt": "Enter your Aptos wallet private key",
             "is_secure": True,
             "is_connect_key": True,
             "prompt_on_new": True,
@@ -101,7 +101,7 @@ class EkidenPerpetualTestnetConfigMap(BaseConnectorConfigMap):
     ekiden_perpetual_testnet_api_key: SecretStr = Field(
         default=...,
         json_schema_extra={
-            "prompt": "Enter your Arbitrum or vault address",
+            "prompt": "Enter your Aptos or vault address",
             "is_secure": True,
             "is_connect_key": True,
             "prompt_on_new": True,

@@ -11,11 +11,11 @@ class EkidenPerpetualWebUtilsTest(unittest.TestCase):
 
     def test_public_rest_url(self):
         url = web_utils.public_rest_url(CONSTANTS.SNAPSHOT_REST_URL)
-        self.assertEqual("https://api.ekiden.xyz/info", url)
+        self.assertEqual("https://api.ekiden.fi/info", url)
 
     def test_private_rest_url(self):
         url = web_utils.public_rest_url(CONSTANTS.SNAPSHOT_REST_URL)
-        self.assertEqual("https://api.ekiden.xyz/info", url)
+        self.assertEqual("https://api.ekiden.fi/info", url)
 
     def test_build_api_factory(self):
         api_factory = web_utils.build_api_factory()

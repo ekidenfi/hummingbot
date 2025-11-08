@@ -820,6 +820,6 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     def _last_funding_time(self) -> int:
         """
-        Funding settlement occurs every 1 hours as mentioned in https://ekiden.gitbook.io/ekiden-docs/trading/funding
+        Funding settlement occurs every 1 hour as mentioned in https://ekiden.gitbook.io/ekiden-docs/trading/funding
         """
         return int(((time.time() // 3600) - 1) * 3600 * 1e3)

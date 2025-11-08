@@ -12,11 +12,13 @@ TESTNET_DOMAIN = "ekiden_perpetual_testnet"
 
 PERPETUAL_BASE_URL = "https://api.ekiden.fi"
 
-TESTNET_BASE_URL = "https://api.staging.ekiden.fi"
+# TESTNET_BASE_URL = "https://api.staging.ekiden.fi"
+TESTNET_BASE_URL = "http://localhost:3010"
 
 PERPETUAL_WS_URL = "wss://api.ekiden.fi/ws"
 
-TESTNET_WS_URL = "wss://api.staging.ekiden.fi/ws"
+# TESTNET_WS_URL = "wss://api.staging.ekiden.fi/ws"
+TESTNET_WS_URL = "ws://localhost:3010/ws"
 
 FUNDING_RATE_UPDATE_INTERNAL_SECOND = 60
 
@@ -55,7 +57,7 @@ SET_LEVERAGE_URL = "/exchange"
 
 GET_LAST_FUNDING_RATE_PATH_URL = "/info"
 
-PING_URL = "/info"
+PING_URL = "/ping"
 
 TRADES_ENDPOINT_NAME = "trades"
 DEPTH_ENDPOINT_NAME = "l2Book"
