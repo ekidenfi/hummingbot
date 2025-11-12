@@ -1,73 +1,44 @@
 from hummingbot.core.api_throttler.data_types import LinkedLimitWeightPair, RateLimit
 from hummingbot.core.data_type.in_flight_order import OrderState
 
+DOMAIN = ""
+
 EXCHANGE_NAME = "ekiden_perpetual"
-BROKER_ID = "HBOT"
-MAX_ORDER_ID_LEN = None
-
-MARKET_ORDER_SLIPPAGE = 0.05
-
-DOMAIN = EXCHANGE_NAME
-TESTNET_DOMAIN = "ekiden_perpetual_testnet"
-
 PERPETUAL_BASE_URL = "https://api.ekiden.fi"
-
-# TESTNET_BASE_URL = "https://api.staging.ekiden.fi"
-TESTNET_BASE_URL = "http://localhost:3010"
-
 PERPETUAL_WS_URL = "wss://api.ekiden.fi/ws"
 
-# TESTNET_WS_URL = "wss://api.staging.ekiden.fi/ws"
-TESTNET_WS_URL = "ws://localhost:3010/ws"
+BROKER_ID = "HBOT"
 
-FUNDING_RATE_UPDATE_INTERNAL_SECOND = 60
+WS_PUBLIC = "/public"
+WS_PRIVATE = "/private"
 
-CURRENCY = "USD"
-
-META_INFO = "meta"
-
-ASSET_CONTEXT_TYPE = "metaAndAssetCtxs"
-
-TRADES_TYPE = "userFills"
-
-ORDER_STATUS_TYPE = "orderStatus"
-
-USER_STATE_TYPE = "clearinghouseState"
-
-# yes
-TICKER_PRICE_CHANGE_URL = "/info"
-# yes
-SNAPSHOT_REST_URL = "/info"
-
-EXCHANGE_INFO_URL = "/info"
-
-CANCEL_ORDER_URL = "/exchange"
-
-CREATE_ORDER_URL = "/exchange"
-
-ACCOUNT_TRADE_LIST_URL = "/info"
-
-ORDER_URL = "/info"
-
-ACCOUNT_INFO_URL = "/info"
-
-POSITION_INFORMATION_URL = "/info"
-
-SET_LEVERAGE_URL = "/exchange"
-
-GET_LAST_FUNDING_RATE_PATH_URL = "/info"
+API_VERSION = "/api/v1"
 
 PING_URL = "/ping"
 
-TRADES_ENDPOINT_NAME = "trades"
-DEPTH_ENDPOINT_NAME = "l2Book"
+MARKET_STATS = "/market/candles/stats/{market_addr}"
+MARKET_FILLS = "/market/fills"
+MARKET_FUNDING = "/market/funding_rate"
+MARKET_INFO = "/market/market_info"
+MARKET_ORDERS = "/market/orders"
 
+DEPOSITS = "/transaction/deposits"
+WITHDRAWALS = "/transaction/withdrawals"
 
-USER_ORDERS_ENDPOINT_NAME = "orderUpdates"
-USEREVENT_ENDPOINT_NAME = "user"
+AUTH_URL = "/authorize"
 
-# Order Statuses
-ORDER_STATE = {
+USER_SUBACCOUNTS = "/user/accounts/owned"
+USER_ACCOUNT_OWNER = "/user/accounts/owner"
+USER_FILLS = "/user/fills"
+USER_SEND_INTENT = "/user/intent"
+USER_SET_LEVERAGE = "/user/leverage"
+USER_ORDERS = "/user/orders"
+USER_PORTFOLIO = "/user/portfolio"
+USER_POSITIONS = "/user/positions"
+USER_VAULTS = "/user/vaults"
+USER_WITHDRAW_TO_FUNDING = "/user/vaults/withdraw"
+
+ORDER_STATUSES = {
     "open": OrderState.OPEN,
     "resting": OrderState.OPEN,
     "filled": OrderState.FILLED,
@@ -77,41 +48,128 @@ ORDER_STATE = {
     "perpMarginRejected": OrderState.FAILED,
 }
 
-HEARTBEAT_TIME_INTERVAL = 30.0
+ORDER_NOT_EXIST_MESSAGE = "order"
+UNKNOWN_ORDER_MESSAGE = "Order was never placed, already canceled, or filled"
 
-MAX_REQUEST = 1_200
+HEARTBEAT_TIME_INTERVAL = 20.0
+
+MAX_REQUEST = 600
 ALL_ENDPOINTS_LIMIT = "All"
 
 RATE_LIMITS = [
     RateLimit(ALL_ENDPOINTS_LIMIT, limit=MAX_REQUEST, time_interval=60),
-
-    # Weight Limits for individual endpoints
-    RateLimit(limit_id=SNAPSHOT_REST_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=TICKER_PRICE_CHANGE_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=EXCHANGE_INFO_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=PING_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=ORDER_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=CREATE_ORDER_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=CANCEL_ORDER_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-
-    RateLimit(limit_id=ACCOUNT_TRADE_LIST_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=SET_LEVERAGE_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=ACCOUNT_INFO_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=POSITION_INFORMATION_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-    RateLimit(limit_id=GET_LAST_FUNDING_RATE_PATH_URL, limit=MAX_REQUEST, time_interval=60,
-              linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT)]),
-
+    # Health & Market
+    RateLimit(
+        PING_URL,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        MARKET_FILLS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        MARKET_FUNDING,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        MARKET_INFO,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        MARKET_ORDERS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    # Transactions
+    RateLimit(
+        DEPOSITS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        WITHDRAWALS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    # Auth
+    RateLimit(
+        AUTH_URL,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    # User endpoints
+    RateLimit(
+        USER_SUBACCOUNTS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_ACCOUNT_OWNER,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_FILLS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_SEND_INTENT,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_SET_LEVERAGE,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_ORDERS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_PORTFOLIO,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_POSITIONS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_VAULTS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
+        USER_WITHDRAW_TO_FUNDING,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
 ]
-ORDER_NOT_EXIST_MESSAGE = "order"
-UNKNOWN_ORDER_MESSAGE = "Order was never placed, already canceled, or filled"
+
+CURRENCY = "USD"

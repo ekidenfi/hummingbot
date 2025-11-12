@@ -1,16 +1,19 @@
+import base64
 import json
+import secrets
 import time
-from collections import OrderedDict
 
-import eth_account
-import msgpack
-from eth_account.messages import encode_typed_data
-from eth_utils import keccak, to_hex
+from aiohttp import ClientSession
+from aptos_sdk.account import Account
 
-from hummingbot.connector.derivative.ekiden_perpetual import ekiden_perpetual_constants as CONSTANTS
-from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_web_utils import order_spec_to_order_wire
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants import (
+    API_VERSION,
+    AUTH_URL,
+    PERPETUAL_BASE_URL,
+)
 from hummingbot.core.web_assistant.auth import AuthBase
 from hummingbot.core.web_assistant.connections.data_types import RESTMethod, RESTRequest, WSRequest
+from hummingbot.core.web_assistant.connections.rest_connection import RESTConnection
 
 
 class EkidenPerpetualAuth(AuthBase):
@@ -18,152 +21,60 @@ class EkidenPerpetualAuth(AuthBase):
     Auth class required by Ekiden Perpetual API
     """
 
-    def __init__(self, api_key: str, api_secret: str, use_vault: bool):
-        self._api_key: str = api_key
-        self._api_secret: str = api_secret
-        self._use_vault: bool = use_vault
-        self.wallet = eth_account.Account.from_key(api_secret)
+    def __init__(self, private_key: str):
+        self._private_key = private_key
+        self._token = None
+        self._init_wallet()
 
-    @classmethod
-    def address_to_bytes(cls, address):
-        return bytes.fromhex(address[2:] if address.startswith("0x") else address)
-
-    @classmethod
-    def action_hash(cls, action, vault_address, nonce):
-        data = msgpack.packb(action)
-        data += nonce.to_bytes(8, "big")
-        if vault_address is None:
-            data += b"\x00"
-        else:
-            data += b"\x01"
-            data += cls.address_to_bytes(vault_address)
-        return keccak(data)
-
-    def sign_inner(self, wallet, data):
-        structured_data = encode_typed_data(full_message=data)
-        signed = wallet.sign_message(structured_data)
-        return {"r": to_hex(signed["r"]), "s": to_hex(signed["s"]), "v": signed["v"]}
-
-    def construct_phantom_agent(self, hash, is_mainnet):
-        return {"source": "a" if is_mainnet else "b", "connectionId": hash}
-
-    def sign_l1_action(self, wallet, action, active_pool, nonce, is_mainnet):
-        _hash = self.action_hash(action, active_pool, nonce)
-        phantom_agent = self.construct_phantom_agent(_hash, is_mainnet)
-
-        data = {
-            "domain": {
-                "chainId": 1337,
-                "name": "Exchange",
-                "verifyingContract": "0x0000000000000000000000000000000000000000",
-                "version": "1",
-            },
-            "types": {
-                "Agent": [
-                    {"name": "source", "type": "string"},
-                    {"name": "connectionId", "type": "bytes32"},
-                ],
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"},
-                ],
-            },
-            "primaryType": "Agent",
-            "message": phantom_agent,
-        }
-        return self.sign_inner(wallet, data)
+    def _init_wallet(self):
+        account = Account.load_key(self._private_key)
+        self._public_key = account.account_address.__str__()
+        self._signing_key = account.private_key
 
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
-        base_url = request.url
-        if request.method == RESTMethod.POST:
-            request.data = self.add_auth_to_params_post(request.data, base_url)
+        if getattr(request, "is_auth_required", False) and not self._token:
+            await self.get_auth_token()
+
+        if getattr(request, "is_auth_required", False):
+            request.headers = request.headers or {}
+            request.headers["Authorization"] = f"Bearer {self._token}"
+
         return request
 
     async def ws_authenticate(self, request: WSRequest) -> WSRequest:
-        return request  # pass-through
+        return request
 
-    def _sign_update_leverage_params(self, params, base_url, timestamp):
-        signature = self.sign_l1_action(
-            self.wallet,
-            params,
-            None if not self._use_vault else self._api_key,
-            timestamp,
-            CONSTANTS.PERPETUAL_BASE_URL in base_url,
-        )
-        payload = {
-            "action": params,
-            "nonce": timestamp,
-            "signature": signature,
-            "vaultAddress": self._api_key if self._use_vault else None,
-        }
-        return payload
+    async def get_auth_token(self):
+        url = f"{PERPETUAL_BASE_URL}{API_VERSION}{AUTH_URL}"
 
-    def _sign_cancel_params(self, params, base_url, timestamp):
-        order_action = {
-            "type": "cancelByCloid",
-            "cancels": [params["cancels"]],
-        }
-        signature = self.sign_l1_action(
-            self.wallet,
-            order_action,
-            None if not self._use_vault else self._api_key,
-            timestamp,
-            CONSTANTS.PERPETUAL_BASE_URL in base_url,
-        )
-        payload = {
-            "action": order_action,
-            "nonce": timestamp,
-            "signature": signature,
-            "vaultAddress": self._api_key if self._use_vault else None,
+        timestamp_ms = int(time.time() * 1000)
 
-        }
-        return payload
+        nonce_bytes = secrets.token_bytes(16)
+        nonce_b64url = base64.urlsafe_b64encode(nonce_bytes).decode().rstrip("=")
 
-    def _sign_order_params(self, params, base_url, timestamp):
-
-        order = params["orders"]
-        grouping = params["grouping"]
-        order_action = {
-            "type": "order",
-            "orders": [order_spec_to_order_wire(order)],
-            "grouping": grouping,
-        }
-        signature = self.sign_l1_action(
-            self.wallet,
-            order_action,
-            None if not self._use_vault else self._api_key,
-            timestamp,
-            CONSTANTS.PERPETUAL_BASE_URL in base_url,
-        )
+        message = f"AUTHORIZE|{timestamp_ms}|{nonce_b64url}".encode("utf-8")
+        signature = self._signing_key.sign(message).to_bytes().hex()
 
         payload = {
-            "action": order_action,
-            "nonce": timestamp,
+            "public_key": self._public_key,
+            "timestamp_ms": timestamp_ms,
+            "nonce": nonce_b64url,
             "signature": signature,
-            "vaultAddress": self._api_key if self._use_vault else None,
-
         }
-        return payload
+        headers = {"Content-type: application/json"}
 
-    def add_auth_to_params_post(self, params: str, base_url):
-        timestamp = int(self._get_timestamp() * 1e3)
-        payload = {}
-        data = json.loads(params) if params is not None else {}
+        request = RESTRequest(
+            method=RESTMethod.POST,
+            url=url,
+            data=json.dumps(payload),
+            headers=headers
+        )
 
-        request_params = OrderedDict(data or {})
+        session = ClientSession()
+        connection = RESTConnection(session)
+        response = await connection.call(request)
+        json_resp = await response.json()
 
-        request_type = request_params.get("type")
-        if request_type == "order":
-            payload = self._sign_order_params(request_params, base_url, timestamp)
-        elif request_type == "cancel":
-            payload = self._sign_cancel_params(request_params, base_url, timestamp)
-        elif request_type == "updateLeverage":
-            payload = self._sign_update_leverage_params(request_params, base_url, timestamp)
-        payload = json.dumps(payload)
-        return payload
-
-    @staticmethod
-    def _get_timestamp():
-        return time.time()
+        self._token = json_resp.get("token")
+        await session.close()
+        return self._token
