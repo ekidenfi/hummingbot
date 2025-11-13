@@ -18,6 +18,7 @@ from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_auth impo
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_user_stream_data_source import (
     EkidenPerpetualUserStreamDataSource,
 )
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_utils import is_exchange_information_valid
 from hummingbot.connector.derivative.position import Position
 from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativePyBase
 from hummingbot.connector.trading_rule import TradingRule
@@ -40,7 +41,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self,
         balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None,
         domain: str = CONSTANTS.DOMAIN,
-        ekiden_perpetual_private_key: str = None,
+        aptos_private_key: str = None,
         rate_limits_share_pct: Decimal = Decimal("100"),
         trading_pairs: Optional[List[str]] = None,
         trading_required: bool = True,
@@ -51,7 +52,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._trading_pairs = trading_pairs
         self._trading_required = trading_required
         self.coin_to_asset: Dict[str, int] = {}
-        self.ekiden_perpetual_private_key = ekiden_perpetual_private_key
+        self.aptos_private_key = aptos_private_key
         super().__init__(balance_asset_limit, rate_limits_share_pct)
 
     @property
@@ -60,7 +61,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     @property
     def authenticator(self) -> Optional[EkidenPerpetualAuth]:
-        return EkidenPerpetualAuth(self.ekiden_perpetual_private_key)
+        return EkidenPerpetualAuth(self.aptos_private_key)
 
     @property
     def rate_limits_rules(self) -> List[RateLimit]:
@@ -734,7 +735,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: List):
         mapping = bidict()
         for symbol_data in filter(
-            web_utils.is_exchange_information_valid,
+            is_exchange_information_valid,
             exchange_info[0].get("universe", []),
         ):
             exchange_symbol = f"{symbol_data['name']}-{CONSTANTS.CURRENCY}"
@@ -794,13 +795,14 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.USER_PORTFOLIO,
             is_auth_required=True,
         )
+
         quote = CONSTANTS.CURRENCY
-        self._account_balances[quote] = Decimal(
-            account_info["summary"]["total_balance"]
-        )
-        self._account_available_balances[quote] = Decimal(
-            account_info["total_available_balance"]
-        )
+        summary: Dict[str, Any] = account_info["summary"]
+        total_balance: str = summary.get("total_balance", "0")
+        available_balance: str = summary.get("total_available_balance", "0")
+
+        self._account_balances[quote] = Decimal(total_balance) / CONSTANTS.CURRENCY_DECIMALS
+        self._account_available_balances[quote] = Decimal(available_balance) / CONSTANTS.CURRENCY_DECIMALS
 
     async def _update_positions(self):
         positions = await self._api_get(

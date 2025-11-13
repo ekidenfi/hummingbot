@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Any, Dict
 
 from pydantic import Field, SecretStr
 
@@ -15,9 +16,18 @@ CENTRALIZED = True
 EXAMPLE_PAIR = "BTC-WUSDC"
 
 
+def is_exchange_information_valid(rule: Dict[str, Any]) -> bool:
+    """
+    Verifies if a trading pair is enabled to operate with based on its exchange information
+    :param exchange_info: the exchange information for a trading pair
+    :return: True if the trading pair is enabled, False otherwise
+    """
+    return True
+
+
 class EkidenPerpetualConfigMap(BaseConnectorConfigMap):
     connector: str = "ekiden_perpetual"
-    ekiden_perpetual_private_key: SecretStr = Field(
+    aptos_private_key: SecretStr = Field(
         default=...,
         json_schema_extra={
             "prompt": "Enter your Aptos wallet private key",

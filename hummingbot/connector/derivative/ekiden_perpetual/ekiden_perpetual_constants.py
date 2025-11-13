@@ -4,8 +4,8 @@ from hummingbot.core.data_type.in_flight_order import OrderState
 DOMAIN = ""
 
 EXCHANGE_NAME = "ekiden_perpetual"
-PERPETUAL_BASE_URL = "https://api.ekiden.fi"
-PERPETUAL_WS_URL = "wss://api.ekiden.fi/ws"
+PERPETUAL_BASE_URL = "https://api.staging.ekiden.fi"
+PERPETUAL_WS_URL = "wss://api.staging.ekiden.fi/ws"
 
 BROKER_ID = "HBOT"
 
@@ -48,10 +48,20 @@ ORDER_STATUSES = {
     "perpMarginRejected": OrderState.FAILED,
 }
 
+WS_TRADES_TOPIC = "trade"
+WS_ORDERBOOK_TOPIC = "orderbook"
+PUBLIC_TOPICS = [WS_TRADES_TOPIC, WS_ORDERBOOK_TOPIC]
+
+WS_USER_ORDER_TOPIC = "order"
+WS_USER_POSITION_TOPIC = "position"
+WS_USER_FILL_TOPIC = "fill"
+PRIVATE_TOPICS = [WS_USER_ORDER_TOPIC, WS_USER_POSITION_TOPIC, WS_USER_FILL_TOPIC]
+
 ORDER_NOT_EXIST_MESSAGE = "order"
 UNKNOWN_ORDER_MESSAGE = "Order was never placed, already canceled, or filled"
 
 HEARTBEAT_TIME_INTERVAL = 20.0
+FUNDING_INTERVAL_SECONDS = 3600
 
 MAX_REQUEST = 600
 ALL_ENDPOINTS_LIMIT = "All"
@@ -173,3 +183,4 @@ RATE_LIMITS = [
 ]
 
 CURRENCY = "USD"
+CURRENCY_DECIMALS = 10**6

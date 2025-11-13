@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants as CONSTANTS
@@ -15,15 +16,10 @@ if TYPE_CHECKING:
 
 
 class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
-    LISTEN_KEY_KEEP_ALIVE_INTERVAL = (
-        1800  # Recommended to Ping/Update listen key to keep connection alive
-    )
-    HEARTBEAT_TIME_INTERVAL = 30.0
     _logger: Optional[HummingbotLogger] = None
 
     def __init__(
         self,
-        trading_pairs: List[str],
         api_factory: WebAssistantsFactory,
         auth: AuthBase,
         connector: "EkidenPerpetualDerivative",
@@ -33,13 +29,8 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         self._api_factory = api_factory
         self._auth = auth
         self._connector = connector
-        self._current_listen_key = None
-        self._last_listen_key_ping_ts = None
-        self._listen_for_user_stream_task = None
-        self._trading_pairs: List[str] = trading_pairs
         self._ws_assistants: List[WSAssistant] = []
         self.domain = domain
-        self.token = None
 
     @property
     def last_recv_time(self) -> float:
@@ -58,7 +49,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         """
         ws: WSAssistant = await self._get_ws_assistant()
         url = f"{CONSTANTS.PERPETUAL_WS_URL}{CONSTANTS.WS_PRIVATE}"
-        await ws.connect(ws_url=url, ping_timeout=self.HEARTBEAT_TIME_INTERVAL)
+        await ws.connect(ws_url=url, ping_timeout=CONSTANTS.HEARTBEAT_TIME_INTERVAL)
         safe_ensure_future(self._ping_thread(ws))
         return ws
 
@@ -69,27 +60,33 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         :param websocket_assistant: the websocket assistant used to connect to the exchange
         """
         try:
+            id = int(time.time())
+            auth_message = {
+                "op": "auth",
+                "bearer": self._auth.auth_token,
+                "req_id": f"{id}",
+            }
+            auth_request: WSJSONRequest = WSJSONRequest(payload=auth_message)
+
             orders_change_payload = {
-                "method": "subscribe",
-                "subscription": {
-                    "type": "orderUpdates",
-                    "user": self._connector.ekiden_perpetual_api_key,
-                },
+                "op": "subscribe",
+                "args": ["order"],
+                "req_id": f"{id + 1}",
             }
             subscribe_order_change_request: WSJSONRequest = WSJSONRequest(
-                payload=orders_change_payload, is_auth_required=True
+                payload=orders_change_payload
             )
 
             positions_payload = {
-                "method": "subscribe",
-                "subscription": {
-                    "type": "user",
-                    "user": self._connector.ekiden_perpetual_api_key,
-                },
+                "op": "subscribe",
+                "args": ["position"],
+                "req_id": {"id + 2"},
             }
             subscribe_positions_request: WSJSONRequest = WSJSONRequest(
-                payload=positions_payload, is_auth_required=True
+                payload=positions_payload
             )
+
+            await websocket_assistant.send(auth_request)
             await websocket_assistant.send(subscribe_order_change_request)
             await websocket_assistant.send(subscribe_positions_request)
 
@@ -107,21 +104,30 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
     async def _process_event_message(
         self, event_message: Dict[str, Any], queue: asyncio.Queue
     ):
-        if event_message.get("error") is not None:
-            err_msg = event_message.get("error", {}).get(
-                "message", event_message.get("error")
-            )
-            raise IOError(
-                {
-                    "label": "WSS_ERROR",
-                    "message": f"Error received via websocket - {err_msg}.",
-                }
-            )
-        elif event_message.get("channel") in [
-            CONSTANTS.USER_ORDERS_ENDPOINT_NAME,
-            CONSTANTS.USEREVENT_ENDPOINT_NAME,
-        ]:
-            queue.put_nowait(event_message)
+        logger = self.logger()
+        op = event_message.get("op")
+        match op:
+            case "auth":
+                success = event_message.get("success", False)
+                if success:
+                    logger.info("WebSocket authentication succeeded.")
+                else:
+                    error = event_message.get("message", "Unknown error")
+                    logger.error(f"WebSocket authentication failed: {error}")
+            case "subscribed":
+                topic = event_message.get("args", "unknown")
+                logger.info(f"Subscribed to topic: {topic}")
+            case "pong":
+                logger.debug("Received pong message (heartbeat).")
+            case "event":
+                topic = event_message.get("topic")
+                if topic in CONSTANTS.PRIVATE_TOPICS:
+                    queue.put_nowait(event_message)
+            case "error":
+                msg = event_message.get("message", "Unknown error")
+                logger.error(f"Error from user stream: , msg={msg}")
+            case _:
+                logger.warning(f"Unrecognized user stream ws op: {op}")
 
     async def _ping_thread(
         self,
@@ -129,7 +135,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
     ):
         try:
             while True:
-                ping_request = WSJSONRequest(payload={"method": "ping"})
+                ping_request = WSJSONRequest(payload={"op": "ping"})
                 await asyncio.sleep(CONSTANTS.HEARTBEAT_TIME_INTERVAL)
                 await websocket_assistant.send(ping_request)
         except Exception as e:
@@ -144,5 +150,5 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
                     websocket_assistant=websocket_assistant, queue=queue
                 )
             except asyncio.TimeoutError:
-                ping_request = WSJSONRequest(payload={"method": "ping"})
+                ping_request = WSJSONRequest(payload={"op": "ping"})
                 await websocket_assistant.send(ping_request)

@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants as CONSTANTS
 from hummingbot.core.api_throttler.async_throttler import AsyncThrottler
@@ -29,30 +29,12 @@ def build_api_factory(
     return api_factory
 
 
-def build_api_factory_without_time_synchronizer_pre_processor(
-    throttler: AsyncThrottler,
-) -> WebAssistantsFactory:
-    api_factory = WebAssistantsFactory(
-        throttler=throttler, rest_pre_processors=[EkidenPerpetualRESTPreProcessor()]
-    )
-    return api_factory
-
-
 def create_throttler() -> AsyncThrottler:
     return AsyncThrottler(CONSTANTS.RATE_LIMITS)
 
 
 async def get_current_server_time(throttler, domain) -> float:
     return time.time()
-
-
-def is_exchange_information_valid(rule: Dict[str, Any]) -> bool:
-    """
-    Verifies if a trading pair is enabled to operate with based on its exchange information
-    :param exchange_info: the exchange information for a trading pair
-    :return: True if the trading pair is enabled, False otherwise
-    """
-    return True
 
 
 def public_rest_url(path_url: str, domain: str = CONSTANTS.DOMAIN) -> str:
