@@ -35,51 +35,6 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     ) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
 
-    async def get_funding_info(self, trading_pair: str) -> FundingInfo:
-        symbol = await self._connector.exchange_symbol_associated_to_pair(
-            trading_pair=trading_pair
-        )
-        response: List = await self._request_pair_funding_info(symbol)
-
-        timestamp_str = response[0]["next_funding_time"]
-        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        unix_ts = dt.timestamp()
-        unix_ts_ms = int(unix_ts * 1000)
-
-        funding_info = FundingInfo(
-            trading_pair=trading_pair,
-            index_price=Decimal(response[0]["oracle_price"]),
-            mark_price=Decimal(response[0]["mark_price"]),
-            next_funding_utc_timestamp=unix_ts_ms,
-            rate=Decimal(response[0]["funding_rate_raw"]),
-        )
-        return funding_info
-
-    async def listen_for_funding_info(self, output: asyncio.Queue):
-        """
-        Reads the funding info events queue and updates the local funding info information.
-        """
-        while True:
-            try:
-                for trading_pair in self._trading_pairs:
-                    funding_info = await self.get_funding_info(trading_pair)
-                    funding_info_update = FundingInfoUpdate(
-                        trading_pair=trading_pair,
-                        index_price=funding_info.index_price,
-                        mark_price=funding_info.mark_price,
-                        next_funding_utc_timestamp=funding_info.next_funding_utc_timestamp,
-                        rate=funding_info.rate,
-                    )
-                    output.put_nowait(funding_info_update)
-                await self._sleep(CONSTANTS.FUNDING_INTERVAL_SECONDS)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.logger().exception(
-                    "Unexpected error when processing public funding info updates from exchange"
-                )
-                await self._sleep(CONSTANTS.FUNDING_INTERVAL_SECONDS)
-
     async def _request_order_book_snapshot(self):
         raise NotImplementedError
 
@@ -104,7 +59,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         try:
             id = int(time.time())
             for trading_pair in self._trading_pairs:
-                market_addr = await self._connector.market_addr_associated_to_pair(
+                market_addr = await self._connector.market_address_associated_to_pair(
                     trading_pair=trading_pair
                 )
                 order_book_payload = {
@@ -117,6 +72,11 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                     "args": [f"trade/{market_addr}"],
                     "req_id": f"{id + 1}",
                 }
+                ticker_payload = {
+                    "op": "subscribe",
+                    "args": [f"ticker/{market_addr}"],
+                    "req_id": f"{id + 2}",
+                }
 
                 subscribe_orderbook_request: WSJSONRequest = WSJSONRequest(
                     payload=order_book_payload
@@ -124,9 +84,13 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 subscribe_trade_request: WSJSONRequest = WSJSONRequest(
                     payload=trades_payload
                 )
+                subscribe_ticker_request: WSJSONRequest = WSJSONRequest(
+                    payload=ticker_payload
+                )
 
                 await ws.send(subscribe_orderbook_request)
                 await ws.send(subscribe_trade_request)
+                await ws.send(subscribe_ticker_request)
 
                 self.logger().info("Subscribed to public order book, trade channels...")
         except asyncio.CancelledError:
@@ -161,10 +125,12 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 logger.warning(f"Unrecognized order book ws_stream op: {op}")
 
         match topic:
-            case CONSTANTS.WS_TRADES_TOPIC:
+            case CONSTANTS.WS_TRADES:
                 channel = self._trade_messages_queue_key
-            case CONSTANTS.WS_ORDERBOOK_TOPIC:
+            case CONSTANTS.WS_ORDERBOOK:
                 channel = self._diff_messages_queue_key
+            case CONSTANTS.WS_TICKER:
+                channel = self._funding_info_messages_queue_key
 
         return channel
 
@@ -172,7 +138,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         self, raw_message: Dict[str, Any], message_queue: asyncio.Queue
     ):
         timestamp: float = raw_message["data"]["timestamp"] * 1e-3
-        trading_pair = await self._connector.trading_pair_associated_to_market_addr(
+        trading_pair = await self._connector.trading_pair_associated_to_market_address(
             raw_message["data"]["market_addr"]
         )
         data = raw_message["data"]
@@ -196,7 +162,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     ):
         data = raw_message["data"]
         trades: List[Dict[str, Any]] = data["trades"]
-        trading_pair = await self._connector.trading_pair_associated_to_market_addr(
+        trading_pair = await self._connector.trading_pair_associated_to_market_address(
             raw_message["data"]["market_addr"]
         )
 
@@ -218,6 +184,43 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             )
 
             message_queue.put_nowait(trade_message)
+
+    async def _parse_funding_info_message(
+        self, raw_message: Dict[str, Any], message_queue: asyncio.Queue
+    ):
+        data = raw_message["data"]
+        trading_pair = await self._connector.trading_pair_associated_to_market_address(
+            raw_message["market_addr"]
+        )
+
+        funding_info_update = FundingInfoUpdate(
+            trading_pair=trading_pair,
+            index_price=Decimal(data["index_price"]),
+            mark_price=Decimal(data["mark_price"]),
+            next_funding_utc_timestamp=data["next_funding_time"],
+            rate=Decimal(data["funding_rate"]),
+        )
+        message_queue.put_nowait(funding_info_update)
+
+    async def get_funding_info(self, trading_pair: str) -> FundingInfo:
+        symbol = await self._connector.exchange_symbol_associated_to_pair(
+            trading_pair=trading_pair
+        )
+        response: List = await self._request_pair_funding_info(symbol)
+
+        timestamp_str = response[0]["next_funding_time"]
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        unix_ts = dt.timestamp()
+        unix_ts_ms = int(unix_ts * 1000)
+
+        funding_info = FundingInfo(
+            trading_pair=trading_pair,
+            index_price=Decimal(response[0]["oracle_price"]),
+            mark_price=Decimal(response[0]["mark_price"]),
+            next_funding_utc_timestamp=unix_ts_ms,
+            rate=Decimal(response[0]["funding_rate_raw"]),
+        )
+        return funding_info
 
     async def _request_pair_funding_info(self, trading_pair: str):
         data = await self._connector._api_get(

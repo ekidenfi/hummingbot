@@ -32,12 +32,6 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         self._ws_assistants: List[WSAssistant] = []
         self.domain = domain
 
-    @property
-    def last_recv_time(self) -> float:
-        if self._ws_assistant:
-            return self._ws_assistant.last_recv_time
-        return 0
-
     async def _get_ws_assistant(self) -> WSAssistant:
         if self._ws_assistant is None:
             self._ws_assistant = await self._api_factory.get_ws_assistant()
@@ -50,7 +44,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         ws: WSAssistant = await self._get_ws_assistant()
         url = f"{CONSTANTS.PERPETUAL_WS_URL}{CONSTANTS.WS_PRIVATE}"
         await ws.connect(ws_url=url, ping_timeout=CONSTANTS.HEARTBEAT_TIME_INTERVAL)
-        safe_ensure_future(self._ping_thread(ws))
+        safe_ensure_future(self._send_ping(ws))
         return ws
 
     async def _subscribe_channels(self, websocket_assistant: WSAssistant):
@@ -129,7 +123,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             case _:
                 logger.warning(f"Unrecognized user stream ws op: {op}")
 
-    async def _ping_thread(
+    async def _send_ping(
         self,
         websocket_assistant: WSAssistant,
     ):

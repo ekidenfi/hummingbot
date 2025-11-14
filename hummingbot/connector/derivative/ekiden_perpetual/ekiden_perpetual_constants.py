@@ -1,3 +1,5 @@
+from enum import Enum
+
 from hummingbot.core.api_throttler.data_types import LinkedLimitWeightPair, RateLimit
 from hummingbot.core.data_type.in_flight_order import OrderState
 
@@ -38,24 +40,34 @@ USER_POSITIONS = "/user/positions"
 USER_VAULTS = "/user/vaults"
 USER_WITHDRAW_TO_FUNDING = "/user/vaults/withdraw"
 
+
+class IntentType(Enum):
+    ORDER_CREATE = "order_create"
+    ORDER_CANCEL = "order_cancel"
+    ORDER_CANCEL_ALL = "order_cancel_all"
+    ASSIGN_LEVERAGE = "leverage_assign"
+
+
 ORDER_STATUSES = {
-    "open": OrderState.OPEN,
-    "resting": OrderState.OPEN,
+    "created": OrderState.OPEN,
+    "placed": OrderState.OPEN,
     "filled": OrderState.FILLED,
-    "canceled": OrderState.CANCELED,
+    "cancelled": OrderState.CANCELED,
     "rejected": OrderState.FAILED,
-    "reduceOnlyCanceled": OrderState.CANCELED,
-    "perpMarginRejected": OrderState.FAILED,
+    "partial_filled": OrderState.PARTIALLY_FILLED,
+    "partial_filled_and_cancelled": OrderState.PARTIALLY_FILLED,
 }
 
-WS_TRADES_TOPIC = "trade"
-WS_ORDERBOOK_TOPIC = "orderbook"
-PUBLIC_TOPICS = [WS_TRADES_TOPIC, WS_ORDERBOOK_TOPIC]
 
-WS_USER_ORDER_TOPIC = "order"
-WS_USER_POSITION_TOPIC = "position"
-WS_USER_FILL_TOPIC = "fill"
-PRIVATE_TOPICS = [WS_USER_ORDER_TOPIC, WS_USER_POSITION_TOPIC, WS_USER_FILL_TOPIC]
+WS_TRADES = "trade"
+WS_ORDERBOOK = "orderbook"
+WS_TICKER = "ticker"
+PUBLIC_TOPICS = [WS_TRADES, WS_ORDERBOOK, WS_TICKER]
+
+WS_USER_ORDER = "order"
+WS_USER_POSITION = "position"
+WS_USER_FILL = "fill"
+PRIVATE_TOPICS = [WS_USER_ORDER, WS_USER_POSITION, WS_USER_FILL]
 
 ORDER_NOT_EXIST_MESSAGE = "order"
 UNKNOWN_ORDER_MESSAGE = "Order was never placed, already canceled, or filled"
@@ -182,5 +194,5 @@ RATE_LIMITS = [
     ),
 ]
 
-CURRENCY = "USD"
+CURRENCY = "USDC"
 CURRENCY_DECIMALS = 10**6

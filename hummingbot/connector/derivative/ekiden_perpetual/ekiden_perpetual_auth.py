@@ -21,10 +21,11 @@ class EkidenPerpetualAuth(AuthBase):
     def __init__(self, aptos_private_key: str):
         self._root_private_key = aptos_private_key
         self._root_account = Account.load_key(self._root_private_key)
-        self.funding_account = None
+        self.trading_account = None
+        self.trading_address = None
         self.pub_key = None
         self._token = None
-        self.derive_funding_acc()
+        self.derive_trading_acc()
 
     @property
     def auth_token(self) -> Optional[str]:
@@ -50,7 +51,7 @@ class EkidenPerpetualAuth(AuthBase):
             base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
         )
         message = f"AUTHORIZE|{timestamp_ms}|{nonce_b64url}".encode()
-        signature = str(self.funding_account.sign(message))
+        signature = str(self.trading_account.sign(message))
 
         payload = {
             "public_key": self.pub_key,
@@ -73,7 +74,7 @@ class EkidenPerpetualAuth(AuthBase):
         token = json_resp.get("token")
         return token
 
-    def derive_funding_acc(self, nonce: int = 0) -> None:
+    def derive_trading_acc(self, nonce: int = 0) -> None:
         DERIVATION_PREFIX = "APTOS\nmessage: Ekiden Trading\nnonce: "
         root_pub_key = str(self._root_account.account_address)
         msg = f"{DERIVATION_PREFIX}{root_pub_key.lower()}Tradingv2{nonce}"
@@ -82,5 +83,6 @@ class EkidenPerpetualAuth(AuthBase):
         derived_seed32 = bytes.fromhex(sig_hex)[:32]
         derived_pk = f"ed25519-priv-0x{derived_seed32.hex()}"
 
-        self.funding_account = Account.load_key(derived_pk)
-        self.pub_key = str(self.funding_account.public_key())
+        self.trading_account = Account.load_key(derived_pk)
+        self.trading_address = str(self.trading_account.address)
+        self.pub_key = str(self.trading_account.public_key())
