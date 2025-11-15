@@ -45,7 +45,35 @@ class IntentType(Enum):
     ORDER_CREATE = "order_create"
     ORDER_CANCEL = "order_cancel"
     ORDER_CANCEL_ALL = "order_cancel_all"
-    ASSIGN_LEVERAGE = "leverage_assign"
+    LEVERAGE_ASSIGN = "leverage_assign"
+
+
+class TimeInForce(Enum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"
+    POST_ONLY = "PostOnly"
+    ALO = "ALO"
+
+
+class TpSlMode(Enum):
+    FULL = "FULL"
+    PARTIAL = "PARTIAL"
+
+
+class TpSlOrderType(Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+
+class OrderSide(Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderTypeString(Enum):
+    LIMIT = "limit"
+    MARKET = "market"
 
 
 ORDER_STATUSES = {
@@ -69,8 +97,7 @@ WS_USER_POSITION = "position"
 WS_USER_FILL = "fill"
 PRIVATE_TOPICS = [WS_USER_ORDER, WS_USER_POSITION, WS_USER_FILL]
 
-ORDER_NOT_EXIST_MESSAGE = "order"
-UNKNOWN_ORDER_MESSAGE = "Order was never placed, already canceled, or filled"
+AUTH_ERROR = {"code": "UNAUTHORIZED", "message": "Unauthorized"}
 
 HEARTBEAT_TIME_INTERVAL = 20.0
 FUNDING_INTERVAL_SECONDS = 3600
@@ -196,3 +223,6 @@ RATE_LIMITS = [
 
 CURRENCY = "USDC"
 CURRENCY_DECIMALS = 10**6
+
+# Used for the intent signature generation
+SEED = "e2ac4e5688d964270ad876d760c2ebb2d54fb26d93512c790049b6583730d06f"  # noqa: mock

@@ -1,14 +1,11 @@
 import asyncio
-import hashlib
-import time
 from decimal import Decimal
-from typing import Any, AsyncIterable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bidict import bidict
 
-from hummingbot.connector.constants import s_decimal_NaN
+import hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants as CONSTANTS
 from hummingbot.connector.derivative.ekiden_perpetual import (
-    ekiden_perpetual_constants as CONSTANTS,
     ekiden_perpetual_signing as ekiden_signing,
     ekiden_perpetual_web_utils as web_utils,
 )
@@ -16,23 +13,32 @@ from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_api_order
     EkidenPerpetualAPIOrderBookDataSource,
 )
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_auth import EkidenPerpetualAuth
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants import (
+    IntentType,
+    OrderSide,
+    OrderTypeString,
+    TimeInForce,
+)
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_user_stream_data_source import (
     EkidenPerpetualUserStreamDataSource,
 )
 from hummingbot.connector.derivative.position import Position
 from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativePyBase
 from hummingbot.connector.trading_rule import TradingRule
-from hummingbot.connector.utils import combine_to_hb_trading_pair, get_new_client_order_id, split_hb_trading_pair
+from hummingbot.connector.utils import combine_to_hb_trading_pair, split_hb_trading_pair
 from hummingbot.core.api_throttler.data_types import RateLimit
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PositionSide, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderUpdate, TradeUpdate
-from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
+from hummingbot.core.data_type.perpetual_api_order_book_data_source import PerpetualAPIOrderBookDataSource
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeBase
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
 from hummingbot.core.utils.async_utils import safe_ensure_future, safe_gather
 from hummingbot.core.utils.estimate_fee import build_trade_fee
 from hummingbot.core.utils.tracking_nonce import NonceCreator
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
+
+s_decimal_NaN = Decimal("nan")
+s_decimal_0 = Decimal(0)
 
 
 class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
@@ -41,20 +47,18 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def __init__(
         self,
         balance_asset_limit: Optional[Dict[str, Dict[str, Decimal]]] = None,
-        domain: str = CONSTANTS.DOMAIN,
-        aptos_private_key: str = None,
         rate_limits_share_pct: Decimal = Decimal("100"),
+        aptos_private_key: str = "",
         trading_pairs: Optional[List[str]] = None,
         trading_required: bool = True,
+        domain: str = CONSTANTS.DOMAIN,
     ):
+        self.aptos_private_key = aptos_private_key
+        self._trading_required = trading_required
+        self._trading_pairs = trading_pairs
         self._domain = domain
         self._last_trade_history_timestamp = None
-        self._position_mode = None
-        self._trading_pairs = trading_pairs
-        self._trading_required = trading_required
-        self._nonce_provider = NonceCreator.for_seconds()
-        self.coin_to_asset: Dict[str, int] = {}
-        self.aptos_private_key = aptos_private_key
+        self._nonce_provider = NonceCreator.for_microseconds()
         super().__init__(balance_asset_limit, rate_limits_share_pct)
 
     @property
@@ -62,7 +66,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         return CONSTANTS.EXCHANGE_NAME
 
     @property
-    def authenticator(self) -> Optional[EkidenPerpetualAuth]:
+    def authenticator(self) -> EkidenPerpetualAuth:
         return EkidenPerpetualAuth(self.aptos_private_key)
 
     @property
@@ -93,68 +97,25 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def market_addresses_request_path(self) -> str:
         return CONSTANTS.MARKET_INFO
 
-    @property
-    def check_network_request_path(self) -> str:
-        return CONSTANTS.PING_URL
+    async def _make_trading_rules_request(self) -> List[Dict[str, Any]]:
+        exchange_info: List[Dict[str, Any]] = await self._api_get(
+            path_url=self.trading_rules_request_path
+        )
+        return exchange_info
 
-    @property
-    def trading_pairs(self):
-        return self._trading_pairs
-
-    @property
-    def is_cancel_request_in_exchange_synchronous(self) -> bool:
-        return True
-
-    @property
-    def is_trading_required(self) -> bool:
-        return self._trading_required
-
-    @property
-    def funding_fee_poll_interval(self) -> int:
-        return 120
+    async def _make_trading_pairs_request(self) -> List[Dict[str, Any]]:
+        exchange_info: List[Dict[str, Any]] = await self._api_get(
+            path_url=self.trading_pairs_request_path
+        )
+        return exchange_info
 
     async def _make_network_check_request(self):
-        await self._api_get(path_url=self.check_network_request_path)
+        overwrite_url = CONSTANTS.PERPETUAL_BASE_URL + CONSTANTS.PING_URL
 
-    def supported_order_types(self) -> List[OrderType]:
-        """
-        :return a list of OrderType supported by this connector
-        """
-        return [OrderType.LIMIT, OrderType.MARKET]
-
-    def supported_position_modes(self):
-        """
-        This method needs to be overridden to provide the accurate information depending on the exchange.
-        """
-        return [PositionMode.ONEWAY]
-
-    def get_buy_collateral_token(self, trading_pair: str) -> str:
-        trading_rule: TradingRule = self._trading_rules[trading_pair]
-        return trading_rule.buy_order_collateral_token
-
-    def get_sell_collateral_token(self, trading_pair: str) -> str:
-        trading_rule: TradingRule = self._trading_rules[trading_pair]
-        return trading_rule.sell_order_collateral_token
-
-    def _is_request_exception_related_to_time_synchronizer(
-        self, request_exception: Exception
-    ):
-        return False
-
-    def _create_web_assistants_factory(self) -> WebAssistantsFactory:
-        return web_utils.build_api_factory(throttler=self._throttler, auth=self._auth)
-
-    async def _make_trading_rules_request(self) -> Any:
-        exchange_info = await self._api_get(path_url=self.trading_rules_request_path)
-        return exchange_info
-
-    async def _make_trading_pairs_request(self) -> Any:
-        exchange_info = await self._api_get(path_url=self.trading_pairs_request_path)
-        return exchange_info
-
-    async def _make_market_addresses_request(self) -> Any:
-        exchange_info = await self._api_get(path_url=self.market_addresses_request_path)
-        return exchange_info
+        await self._api_get(
+            path_url=CONSTANTS.PING_URL,
+            overwrite_url=overwrite_url,
+        )
 
     async def market_address_associated_to_pair(self, trading_pair: str) -> str:
         """
@@ -171,7 +132,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     async def trading_pair_associated_to_market_address(
         self,
         market_address: str,
-    ) -> str:
+    ) -> Optional[str]:
         """
         Used to translate a trading pair from the exchange market address
 
@@ -183,27 +144,49 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             address_map = self.market_addresses_trading_pair_map
             return address_map[market_address]
 
-    def _is_order_not_found_during_status_update_error(
-        self, status_update_exception, LinkedLimitWeightPair: Exception
-    ) -> bool:
-        return CONSTANTS.ORDER_NOT_EXIST_MESSAGE in str(status_update_exception)
+    @property
+    def check_network_request_path(self) -> str:
+        return CONSTANTS.PING_URL
 
-    def _is_order_not_found_during_cancelation_error(
-        self, cancelation_exception: Exception
-    ) -> bool:
-        return CONSTANTS.UNKNOWN_ORDER_MESSAGE in str(cancelation_exception)
+    @property
+    def trading_pairs(self):
+        return self._trading_pairs
 
-    def quantize_order_price(self, trading_pair: str, price: Decimal) -> Decimal:
+    @property
+    def is_cancel_request_in_exchange_synchronous(self) -> bool:
+        return False
+
+    @property
+    def is_trading_required(self) -> bool:
+        return self._trading_required
+
+    @property
+    def funding_fee_poll_interval(self) -> int:
+        return 120
+
+    def supported_order_types(self) -> List[OrderType]:
         """
-        Applies trading rule to quantize order price.
+        :return a list of OrderType supported by this connector
         """
-        d_price = Decimal(round(float(f"{price:.5g}"), 6))
-        return d_price
+        return [OrderType.LIMIT, OrderType.MARKET]
+
+    def supported_position_modes(self) -> List[PositionMode]:
+        return [PositionMode.ONEWAY]
+
+    def get_buy_collateral_token(self, trading_pair: str) -> str:
+        trading_rule: TradingRule = self._trading_rules[trading_pair]
+        return trading_rule.buy_order_collateral_token
+
+    def get_sell_collateral_token(self, trading_pair: str) -> str:
+        trading_rule: TradingRule = self._trading_rules[trading_pair]
+        return trading_rule.sell_order_collateral_token
+
+    async def start_network(self):
+        await self._update_trading_rules()
+        await super().start_network()
 
     async def _update_trading_rules(self):
-        exchange_info = await self._api_get(
-            path_url=self.trading_rules_request_path,
-        )
+        exchange_info: List[Dict[str, Any]] = await self._make_trading_rules_request()
         trading_rules_list = await self._format_trading_rules(exchange_info)
         self._trading_rules.clear()
         for trading_rule in trading_rules_list:
@@ -215,35 +198,131 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             exchange_info=exchange_info
         )
 
-    def _create_order_book_data_source(self) -> OrderBookTrackerDataSource:
-        return EkidenPerpetualAPIOrderBookDataSource(
-            trading_pairs=self._trading_pairs,
-            connector=self,
-            api_factory=self._web_assistants_factory,
-            domain=self.domain,
+    def _is_request_exception_related_to_time_synchronizer(
+        self, request_exception: Exception
+    ):
+        return False
+
+    def _is_order_not_found_during_status_update_error(
+        self, status_update_exception: Exception
+    ) -> bool:
+        return False
+
+    def _is_order_not_found_during_cancelation_error(
+        self, cancelation_exception: Exception
+    ) -> bool:
+        return False
+
+    async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
+        nonce = self._nonce_provider.get_tracking_nonce()
+        payload = {
+            "type": IntentType.ORDER_CANCEL.value,
+            "cancels": [{"sid": order_id}],
+        }
+        signature = ekiden_signing.sign_intent(
+            self._auth.trading_account, payload, nonce
         )
-
-    def _create_user_stream_data_source(self) -> UserStreamTrackerDataSource:
-        return EkidenPerpetualUserStreamDataSource(
-            auth=self._auth,
-            connector=self,
-            api_factory=self._web_assistants_factory,
-            domain=self.domain,
+        data = {
+            "payload": payload,
+            "nonce": nonce,
+            "signature": signature,
+            "user_addr": self._auth.trading_address,
+        }
+        cancel_result = await self._api_post(
+            path_url=CONSTANTS.USER_SEND_INTENT,
+            data=data,
+            is_auth_required=True,
         )
+        try:
+            response_data = cancel_result["response"]["data"]
+            statuses = response_data.get("statuses", [])
+            if not statuses:
+                raise IOError("Unexpected cancel response format: missing statuses")
+            status_info = statuses[0]
+            if "error" in status_info:
+                error_msg = status_info["error"]
+                self.logger().debug(f"Cancel failed: {error_msg}")
+                await self._order_tracker.process_order_not_found(order_id)
+                raise IOError(error_msg)
+            if "success" in status_info:
+                self.logger().info(f"Order {order_id} cancelled successfully.")
+                return True
+        except Exception as e:
+            self.logger().exception(f"Error parsing cancel response: {e}")
+            raise IOError(f"Cancel request failed: {e}")
+        return False
 
-    async def _status_polling_loop_fetch_updates(self):
-        await safe_gather(
-            self._update_trade_history(),
-            self._update_order_status(),
-            self._update_balances(),
-            self._update_positions(),
+    async def _place_order(
+        self,
+        order_id: str,
+        trading_pair: str,
+        amount: Decimal,
+        trade_type: TradeType,
+        order_type: OrderType,
+        price: Decimal,
+        position_action: PositionAction = PositionAction.NIL,
+        **kwargs,
+    ) -> Tuple[str, float]:
+        market_addr = await self.market_address_associated_to_pair(trading_pair)
+        is_buy = trade_type is TradeType.BUY
+        is_reduce = position_action == PositionAction.CLOSE
+        nonce = self._nonce_provider.get_tracking_nonce()
+        tif = TimeInForce.GTC
+        if order_type is OrderType.LIMIT:
+            tif = TimeInForce.ALO
+        elif order_type is OrderType.MARKET:
+            tif = TimeInForce.IOC
+        payload = {
+            "type": IntentType.ORDER_CREATE.value,
+            "orders": [
+                {
+                    "market_addr": market_addr,
+                    "side": OrderSide.BUY.value if is_buy else OrderSide.SELL.value,
+                    "size": int(amount),
+                    "price": int(price),
+                    "leverage": 1,
+                    "type": OrderTypeString.LIMIT.value
+                    if order_type.is_limit_type()
+                    else OrderTypeString.MARKET.value,
+                    "is_cross": True,
+                    "time_in_force": tif.value,
+                    "reduce_only": is_reduce,
+                }
+            ],
+        }
+        signature = ekiden_signing.sign_intent(
+            self._auth.trading_account, payload, nonce
         )
-
-    async def _update_order_status(self):
-        await self._update_orders()
-
-    async def _update_lost_orders_status(self):
-        await self._update_lost_orders()
+        data = {
+            "payload": payload,
+            "nonce": nonce,
+            "signature": signature,
+            "user_addr": self._auth.trading_address,
+        }
+        order_result = await self._api_post(
+            path_url=CONSTANTS.USER_SEND_INTENT,
+            data=data,
+            is_auth_required=True,
+        )
+        try:
+            response_data = order_result["response"]["data"]
+            statuses = response_data.get("statuses", [])
+            if not statuses:
+                raise IOError("Unexpected order response: missing statuses")
+            status_info = statuses[0]
+            if "error" in status_info:
+                raise IOError(
+                    f"Error submitting order {order_id}: {status_info['error']}"
+                )
+            o_data = status_info.get("resting") or status_info.get("filled")
+            sid = o_data.get("sid") if o_data else None
+            if not sid:
+                raise IOError("Missing order SID in response")
+            self.logger().info(f"Order {order_id} placed successfully (SID={sid})")
+            return sid, self.current_timestamp
+        except Exception as e:
+            self.logger().exception(f"Order placement failed: {e}")
+            raise IOError(f"Order placement failed: {e}")
 
     def _get_fee(
         self,
@@ -270,247 +349,46 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         return fee
 
     async def _update_trading_fees(self):
-        """
-        Update fees information from the exchange
-        """
         pass
 
-    # === Orders placing ===
-
-    def buy(
-        self,
-        trading_pair: str,
-        amount: Decimal,
-        order_type=OrderType.LIMIT,
-        price: Decimal = s_decimal_NaN,
-        **kwargs,
-    ) -> str:
-        """
-        Creates a promise to create a buy order using the parameters
-
-        :param trading_pair: the token pair to operate with
-        :param amount: the order amount
-        :param order_type: the type of order to create (MARKET, LIMIT, LIMIT_MAKER)
-        :param price: the order price
-
-        :return: the id assigned by the connector to the order (the client id)
-        """
-        order_id = get_new_client_order_id(
-            is_buy=True,
-            trading_pair=trading_pair,
-            hbot_order_id_prefix=self.client_order_id_prefix,
-            max_id_len=self.client_order_id_max_length,
-        )
-        md5 = hashlib.md5()
-        md5.update(order_id.encode("utf-8"))
-        hex_order_id = f"0x{md5.hexdigest()}"
-        if order_type is OrderType.MARKET:
-            mid_price = self.get_mid_price(trading_pair)
-            slippage = CONSTANTS.MARKET_ORDER_SLIPPAGE
-            market_price = mid_price * Decimal(1 + slippage)
-            price = self.quantize_order_price(trading_pair, market_price)
-
-        safe_ensure_future(
-            self._create_order(
-                trade_type=TradeType.BUY,
-                order_id=hex_order_id,
-                trading_pair=trading_pair,
-                amount=amount,
-                order_type=order_type,
-                price=price,
-                **kwargs,
-            )
-        )
-        return hex_order_id
-
-    def sell(
-        self,
-        trading_pair: str,
-        amount: Decimal,
-        order_type: OrderType = OrderType.LIMIT,
-        price: Decimal = s_decimal_NaN,
-        **kwargs,
-    ) -> str:
-        """
-        Creates a promise to create a sell order using the parameters.
-        :param trading_pair: the token pair to operate with
-        :param amount: the order amount
-        :param order_type: the type of order to create (MARKET, LIMIT, LIMIT_MAKER)
-        :param price: the order price
-        :return: the id assigned by the connector to the order (the client id)
-        """
-        order_id = get_new_client_order_id(
-            is_buy=False,
-            trading_pair=trading_pair,
-            hbot_order_id_prefix=self.client_order_id_prefix,
-            max_id_len=self.client_order_id_max_length,
-        )
-        md5 = hashlib.md5()
-        md5.update(order_id.encode("utf-8"))
-        hex_order_id = f"0x{md5.hexdigest()}"
-        if order_type is OrderType.MARKET:
-            mid_price = self.get_mid_price(trading_pair)
-            slippage = CONSTANTS.MARKET_ORDER_SLIPPAGE
-            market_price = mid_price * Decimal(1 - slippage)
-            price = self.quantize_order_price(trading_pair, market_price)
-
-        safe_ensure_future(
-            self._create_order(
-                trade_type=TradeType.SELL,
-                order_id=hex_order_id,
-                trading_pair=trading_pair,
-                amount=amount,
-                order_type=order_type,
-                price=price,
-                **kwargs,
-            )
-        )
-        return hex_order_id
-
-    async def _place_order(
-        self,
-        order_id: str,
-        trading_pair: str,
-        amount: Decimal,
-        trade_type: TradeType,
-        order_type: OrderType,
-        price: Decimal,
-        position_action: PositionAction = PositionAction.NIL,
-        **kwargs,
-    ) -> Tuple[str, float]:
-        market_addr = await self.market_address_associated_to_pair(trading_pair)
-        is_buy = trade_type is TradeType.BUY
-        is_reduce = position_action == PositionAction.CLOSE
-
-        nonce = self._nonce_provider.get_tracking_nonce()
-
-        tif = "GTC"
-        if order_type is OrderType.LIMIT:
-            tif = "ALO"
-        elif order_type is OrderType.MARKET:
-            tif = "IOC"
-
-        payload = {
-            "type": "order_create",
-            "orders": [
-                {
-                    "market_addr": market_addr,
-                    "side": "buy" if is_buy else "sell",
-                    "size": int(amount),
-                    "price": int(price),
-                    "leverage": 1,
-                    "type": "limit" if order_type.is_limit_type() else "market",
-                    "is_cross": True,
-                    "time_in_force": tif,
-                    "reduce_only": is_reduce,
-                }
-            ],
-        }
-
-        signature = ekiden_signing.sign_intent(
-            self._auth.trading_account, payload, nonce
+    def _create_web_assistants_factory(self) -> WebAssistantsFactory:
+        return web_utils.build_api_factory(
+            throttler=self._throttler,
+            auth=self._auth,
         )
 
-        data = {
-            "payload": payload,
-            "nonce": nonce,
-            "signature": signature,
-            "user_addr": self._auth.trading_address,
-        }
-
-        order_result = await self._api_post(
-            path_url=CONSTANTS.USER_SEND_INTENT,
-            data=data,
-            is_auth_required=True,
+    def _create_order_book_data_source(self) -> PerpetualAPIOrderBookDataSource:
+        return EkidenPerpetualAPIOrderBookDataSource(
+            self.trading_pairs,
+            connector=self,
+            api_factory=self._web_assistants_factory,
+            domain=self._domain,
         )
 
-        try:
-            response_data = order_result["response"]["data"]
-            statuses = response_data.get("statuses", [])
-            if not statuses:
-                raise IOError("Unexpected order response: missing statuses")
-
-            status_info = statuses[0]
-            if "error" in status_info:
-                raise IOError(
-                    f"Error submitting order {order_id}: {status_info['error']}"
-                )
-
-            o_data = status_info.get("resting") or status_info.get("filled")
-            sid = o_data.get("sid") if o_data else None
-            if not sid:
-                raise IOError("Missing order SID in response")
-
-            self.logger().info(f"Order {order_id} placed successfully (SID={sid})")
-            return sid, self.current_timestamp
-
-        except Exception as e:
-            self.logger().exception(f"Order placement failed: {e}")
-            raise IOError(f"Order placement failed: {e}")
-
-    async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
-        nonce = self._nonce_provider.get_tracking_nonce()
-
-        payload = {
-            "type": "order_cancel",
-            "cancels": [{"sid": order_id}],
-        }
-
-        signature = ekiden_signing.sign_intent(
-            self._auth.trading_account, payload, nonce
+    def _create_user_stream_data_source(self) -> UserStreamTrackerDataSource:
+        return EkidenPerpetualUserStreamDataSource(
+            auth=self._auth,
+            api_factory=self._web_assistants_factory,
+            domain=self._domain,
         )
 
-        data = {
-            "payload": payload,
-            "nonce": nonce,
-            "signature": signature,
-            "user_addr": self._auth.trading_address,
-        }
-
-        cancel_result = await self._api_post(
-            path_url=CONSTANTS.USER_SEND_INTENT,
-            data=data,
-            is_auth_required=True,
+    async def _status_polling_loop_fetch_updates(self):
+        await safe_gather(
+            self._update_trade_history(),
+            self._update_order_status(),
+            self._update_balances(),
+            self._update_positions(),
         )
-
-        try:
-            response_data = cancel_result["response"]["data"]
-            statuses = response_data.get("statuses", [])
-            if not statuses:
-                raise IOError("Unexpected cancel response format: missing statuses")
-
-            status_info = statuses[0]
-            if "error" in status_info:
-                error_msg = status_info["error"]
-                self.logger().debug(f"Cancel failed: {error_msg}")
-                await self._order_tracker.process_order_not_found(order_id)
-                raise IOError(error_msg)
-
-            if "success" in status_info:
-                self.logger().info(f"Order {order_id} cancelled successfully.")
-                return True
-
-        except Exception as e:
-            self.logger().exception(f"Error parsing cancel response: {e}")
-            raise IOError(f"Cancel request failed: {e}")
-
-        return False
 
     async def _update_trade_history(self):
         orders = list(self._order_tracker.all_fillable_orders.values())
-        all_fillable_orders = (
-            self._order_tracker.all_fillable_orders_by_exchange_order_id
-        )
-        all_fills_response = []
         if len(orders) > 0:
             try:
-                all_fills_response = await self._api_get(
-                    path_url=CONSTANTS.ACCOUNT_TRADE_LIST_URL,
-                    data={
-                        "type": CONSTANTS.TRADES_TYPE,
-                        "user": self.ekiden_perpetual_api_key,
-                    },
+                all_fills_response: List[Dict[str, Any]] = await self._api_get(
+                    path_url=CONSTANTS.USER_FILLS, is_auth_required=True
                 )
+                for trade_fill in all_fills_response:
+                    self._process_trade_event_message(trade_fill)
             except asyncio.CancelledError:
                 raise
             except Exception as request_error:
@@ -518,162 +396,158 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                     f"Failed to fetch trade updates. Error: {request_error}",
                     exc_info=request_error,
                 )
-            for trade_fill in all_fills_response:
-                self._process_trade_rs_event_message(
-                    order_fill=trade_fill, all_fillable_order=all_fillable_orders
+
+    async def _update_order_status(self):
+        """
+        Calls REST API to get order status
+        """
+
+        active_orders_ids: List[str] = [
+            order.exchange_order_id
+            for order in self.in_flight_orders.values()
+            if order.exchange_order_id
+        ]
+        exchange_orders: List[Dict[str, Any]] = await self._api_get(
+            path_url=CONSTANTS.USER_ORDERS, is_auth_required=True
+        )
+        valid_orders: List[Dict[str, Any]] = [
+            order for order in exchange_orders if order["sid"] in active_orders_ids
+        ]
+
+        for order in valid_orders:
+            self._process_order_event_message(order)
+
+    async def _update_balances(self):
+        """
+        Calls REST API to update total and available balances
+        """
+        account_info = await self._api_get(
+            path_url=CONSTANTS.USER_PORTFOLIO,
+            is_auth_required=True,
+        )
+
+        quote = CONSTANTS.CURRENCY
+        summary: Dict[str, Any] = account_info["summary"]
+        total_balance: str = summary.get("total_balance", "0")
+        available_balance: str = summary.get("total_available_balance", "0")
+
+        self._account_balances[quote] = (
+            Decimal(total_balance) / CONSTANTS.CURRENCY_DECIMALS
+        )
+        self._account_available_balances[quote] = (
+            Decimal(available_balance) / CONSTANTS.CURRENCY_DECIMALS
+        )
+
+    async def _update_positions(self):
+        """
+        Retrieves all positions using the REST API.
+        """
+        positions: List[Dict[str, Any]] = await self._api_get(
+            path_url=CONSTANTS.USER_POSITIONS,
+            is_auth_required=True,
+        )
+        if not positions:
+            for key in list(self._perpetual_trading.account_positions.keys()):
+                self._perpetual_trading.remove_position(key)
+            return
+        else:
+            await self._parse_positions(positions)
+
+    async def _parse_positions(self, positions: List[Dict[str, Any]]):
+        for pos in positions:
+            market_addr = pos.get("market_addr", "")
+            trading_pair = await self.trading_pair_associated_to_market_address(
+                market_addr
+            )
+            if not trading_pair:
+                raise IOError(
+                    f"No known traiding pair for market address {market_addr}"
                 )
-
-    def _process_trade_rs_event_message(
-        self, order_fill: Dict[str, Any], all_fillable_order
-    ):
-        exchange_order_id = str(order_fill.get("oid"))
-        fillable_order = all_fillable_order.get(exchange_order_id)
-        if fillable_order is not None:
-            fee_asset = fillable_order.quote_asset
-
-            position_action = (
-                PositionAction.OPEN
-                if order_fill["dir"].split(" ")[0] == "Open"
-                else PositionAction.CLOSE
+            market_info = self._trading_rules.get(trading_pair, None)
+            if not market_info:
+                raise IOError("Missing the market info for the active position")
+            position_side = (
+                PositionSide.LONG if pos.get("side") == "long" else PositionSide.SHORT
             )
-            fee = TradeFeeBase.new_perpetual_fee(
-                fee_schema=self.trade_fee_schema(),
-                position_action=position_action,
-                percent_token=fee_asset,
-                flat_fees=[
-                    TokenAmount(amount=Decimal(order_fill["fee"]), token=fee_asset)
-                ],
-            )
-
-            trade_update = TradeUpdate(
-                trade_id=str(order_fill["tid"]),
-                client_order_id=fillable_order.client_order_id,
-                exchange_order_id=str(order_fill["oid"]),
-                trading_pair=fillable_order.trading_pair,
-                fee=fee,
-                fill_base_amount=Decimal(order_fill["sz"]),
-                fill_quote_amount=Decimal(order_fill["px"]) * Decimal(order_fill["sz"]),
-                fill_price=Decimal(order_fill["px"]),
-                fill_timestamp=order_fill["time"] * 1e-3,
-            )
-
-            self._order_tracker.process_trade_update(trade_update)
+            amount = abs(Decimal(pos.get("size", 0)))
+            entry_price = Decimal(pos.get("entry_price", 0))
+            unrealized_pnl = Decimal(pos.get("unrealized_pnl", 0))
+            leverage = Decimal(pos.get("leverage", 1))
+            pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
+            if amount > 0:
+                _position = Position(
+                    trading_pair=trading_pair,
+                    position_side=position_side,
+                    unrealized_pnl=unrealized_pnl,
+                    entry_price=entry_price,
+                    amount=amount,
+                    leverage=leverage,
+                )
+                self._perpetual_trading.set_position(pos_key, _position)
+            else:
+                self._perpetual_trading.remove_position(pos_key)
 
     async def _all_trade_updates_for_order(
         self, order: InFlightOrder
     ) -> List[TradeUpdate]:
-        pass
+        return []  # Not implemented on ekiden
 
-    async def _handle_update_error_for_active_order(
-        self, order: InFlightOrder, error: Exception
-    ):
-        try:
-            raise error
-        except (asyncio.TimeoutError, KeyError):
-            self.logger().debug(
-                f"Tracked order {order.client_order_id} does not have an exchange id. "
-                f"Attempting fetch in next polling interval."
-            )
-            await self._order_tracker.process_order_not_found(order.client_order_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as request_error:
-            self.logger().warning(
-                f"Error fetching status update for the active order {order.client_order_id}: {request_error}.",
-            )
-            self.logger().debug(
-                f"Order {order.client_order_id} not found counter: {self._order_tracker._order_not_found_records.get(order.client_order_id, 0)}"
-            )
-            await self._order_tracker.process_order_not_found(order.client_order_id)
+    async def _request_order_fills(self, order: InFlightOrder) -> Dict[str, Any]:
+        pass  # Unused
 
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
-        client_order_id = tracked_order.client_order_id
-        trading_pair = tracked_order.trading_pair
-        side = tracked_order.trade_type.name.lower()
-
-        try:
-            exchange_order_id = (
-                tracked_order.exchange_order_id
-                or await tracked_order.get_exchange_order_id()
+        exch_order = await self._request_order_status_data(tracked_order)
+        if exch_order:
+            exch_status = exch_order["status"].lower()
+            order_state = CONSTANTS.ORDER_STATUSES.get(exch_status)
+            return OrderUpdate(
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=exch_order["timestamp_ms"] / 1e3,
+                new_state=order_state if order_state else tracked_order.current_state,
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=exch_order["sid"],
             )
-        except asyncio.TimeoutError:
-            exchange_order_id = None
+        else:
+            return OrderUpdate(
+                client_order_id=tracked_order.client_order_id,
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=tracked_order.current_state,
+            )
 
-        market_addr = self._market_addr_for_pair.get(trading_pair)
-
-        query_params = {
-            "market_addr": market_addr,
-            "side": side,
-            "page": 1,
-            "per_page": 50,  # fetch enough to find our order
-        }
-
-        orders = await self._api_get(
+    async def _request_order_status_data(
+        self, tracked_order: InFlightOrder
+    ) -> Dict[str, Any] | None:
+        exchange_orders: List[Dict[str, Any]] = await self._api_get(
             path_url=CONSTANTS.USER_ORDERS,
-            params=query_params,
             is_auth_required=True,
         )
-
-        if not isinstance(orders, list):
-            self.logger().error(f"Unexpected orders response: {orders}")
-            raise ValueError("Invalid response format from Ekiden user/orders")
-
-        matched_order = None
-        for order in orders:
-            if (
-                str(order.get("seq")) == str(exchange_order_id)
-                or order.get("sid") == client_order_id
-            ):
-                matched_order = order
-                break
-
-        if not matched_order:
-            raise ValueError(
-                f"Order {exchange_order_id or client_order_id} not found in user/orders response"
+        if not tracked_order.exchange_order_id:
+            return None
+        else:
+            return next(
+                (
+                    order
+                    for order in exchange_orders
+                    if order["sid"] == tracked_order.exchange_order_id
+                ),
+                None,
             )
 
-        order_state = matched_order["status"].lower()
-        order_update = OrderUpdate(
-            trading_pair=trading_pair,
-            update_timestamp=matched_order["timestamp_ms"] / 1e3,
-            new_state=CONSTANTS.ORDER_STATUSES[order_state],
-            client_order_id=client_order_id,
-            exchange_order_id=str(matched_order["seq"]),
-        )
-
-        return order_update
-
-    async def _iter_user_event_queue(self) -> AsyncIterable[Dict[str, any]]:
-        while True:
-            try:
-                yield await self._user_stream_tracker.user_stream.get()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self.logger().network(
-                    "Unknown error. Retrying after 1 seconds.",
-                    exc_info=True,
-                    app_warning_msg="Could not fetch user events from Ekiden. Check API key and network connection.",
-                )
-                await self._sleep(1.0)
-
     async def _user_stream_event_listener(self):
+        """
+        Listens to message in _user_stream_tracker.user_stream queue.
+        """
         async for event_message in self._iter_user_event_queue():
             try:
-                if isinstance(event_message, dict):
-                    channel: str = event_message.get("channel", None)
-                    results = event_message.get("data", None)
-                elif event_message is asyncio.CancelledError:
-                    raise asyncio.CancelledError
-                else:
-                    raise Exception(event_message)
+                channel: Optional[str] = event_message.get("channel", None)
+                results = event_message.get("data", [])
                 if channel not in CONSTANTS.PRIVATE_TOPICS:
                     self.logger().error(
                         f"Unexpected message in user stream: {event_message}.",
                         exc_info=True,
                     )
                     continue
-
                 match channel:
                     case CONSTANTS.WS_USER_ORDER:
                         for order_msg in results:
@@ -682,8 +556,8 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                         for trade_msg in results["fills"]:
                             await self._process_trade_message(trade_msg)
                     case CONSTANTS.WS_USER_POSITION:
-                        ...
-
+                        for position_msg in results:
+                            await self._process_account_position_event(position_msg)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -692,91 +566,135 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 )
                 await self._sleep(5.0)
 
-    async def _process_trade_message(
-        self, trade: Dict[str, Any], client_order_id: Optional[str] = None
-    ):
+    async def _process_account_position_event(self, position_msg: Dict[str, Any]):
+        """
+        Updates position
+        :param position_msg: The position event message payload
+        """
+        ex_trading_pair = position_msg["symbol"]
+        trading_pair = await self.trading_pair_associated_to_exchange_symbol(
+            symbol=ex_trading_pair
+        )
+        position_side = (
+            PositionSide.LONG if position_msg["side"] == "Buy" else PositionSide.SHORT
+        )
+        position_value = Decimal(str(position_msg["positionValue"]))
+        entry_price = Decimal(str(position_msg["entryPrice"]))
+        amount = Decimal(str(position_msg["size"]))
+        leverage = Decimal(str(position_msg["leverage"]))
+        unrealized_pnl = position_value - (amount * entry_price * leverage)
+        pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
+        if amount != s_decimal_0:
+            position = Position(
+                trading_pair=trading_pair,
+                position_side=position_side,
+                unrealized_pnl=unrealized_pnl,
+                entry_price=entry_price,
+                amount=amount
+                * (
+                    Decimal("-1.0")
+                    if position_side == PositionSide.SHORT
+                    else Decimal("1.0")
+                ),
+                leverage=leverage,
+            )
+            self._perpetual_trading.set_position(pos_key, position)
+        else:
+            self._perpetual_trading.remove_position(pos_key)
+
+        # Trigger balance update because Ekiden doesn't have balance updates through the websocket
+        safe_ensure_future(self._update_balances())
+
+    def _process_trade_event_message(self, trade_msg: Dict[str, Any]):
         """
         Updates in-flight order and trigger order filled event for trade message received. Triggers order completed
         event if the total executed amount equals to the specified order amount.
-        Example Trade:
+        :param trade_msg: The trade event message payload
         """
-        exchange_order_id = str(trade.get("oid", ""))
-        tracked_order = (
-            self._order_tracker.all_fillable_orders_by_exchange_order_id.get(
-                exchange_order_id
-            )
-        )
 
-        if tracked_order is None:
-            all_orders = self._order_tracker.all_fillable_orders
-            for k, v in all_orders.items():
-                await v.get_exchange_order_id()
-            _cli_tracked_orders = [
-                o
-                for o in all_orders.values()
-                if exchange_order_id == o.exchange_order_id
-            ]
-            if not _cli_tracked_orders:
-                self.logger().debug(
-                    f"Ignoring trade message with id {client_order_id}: not in in_flight_orders."
-                )
-                return
-            tracked_order = _cli_tracked_orders[0]
-        trading_pair_base_coin = tracked_order.base_asset
-        if trade["coin"] == trading_pair_base_coin:
-            position_action = (
-                PositionAction.OPEN
-                if trade["dir"].split(" ")[0] == "Open"
-                else PositionAction.CLOSE
-            )
-            fee_asset = tracked_order.quote_asset
-            fee = TradeFeeBase.new_perpetual_fee(
-                fee_schema=self.trade_fee_schema(),
-                position_action=position_action,
-                percent_token=fee_asset,
-                flat_fees=[TokenAmount(amount=Decimal(trade["fee"]), token=fee_asset)],
-            )
-            trade_update: TradeUpdate = TradeUpdate(
-                trade_id=str(trade["tid"]),
-                client_order_id=tracked_order.client_order_id,
-                exchange_order_id=str(trade["oid"]),
-                trading_pair=tracked_order.trading_pair,
-                fill_timestamp=trade["time"] * 1e-3,
-                fill_price=Decimal(trade["px"]),
-                fill_base_amount=Decimal(trade["sz"]),
-                fill_quote_amount=Decimal(trade["px"]) * Decimal(trade["sz"]),
-                fee=fee,
+        client_order_id = str(trade_msg["orderLinkId"])
+        fillable_order = self._order_tracker.all_fillable_orders.get(client_order_id)
+
+        if fillable_order is not None:
+            trade_update = self._parse_trade_update(
+                trade_msg=trade_msg, tracked_order=fillable_order
             )
             self._order_tracker.process_trade_update(trade_update)
 
-    def _process_order_message(self, order_msg: Dict[str, Any]):
-        """
-        Updates in-flight order and triggers cancelation or failure event if needed.
+    def _parse_trade_update(
+        self, trade_msg: Dict, tracked_order: InFlightOrder
+    ) -> TradeUpdate:
+        trade_id: str = str(trade_msg["execId"])
 
-        :param order_msg: The order response from either REST or web socket API (they are of the same format)
-
-        Example Order:
-        """
-        client_order_id = str(order_msg["order"].get("cloid", ""))
-        tracked_order = self._order_tracker.all_updatable_orders.get(client_order_id)
-        if not tracked_order:
-            self.logger().debug(
-                f"Ignoring order message with id {client_order_id}: not in in_flight_orders."
+        fee_asset = tracked_order.quote_asset
+        fee_amount = Decimal(trade_msg["execFee"])
+        position_side = trade_msg["side"]
+        position_action = (
+            PositionAction.OPEN
+            if (
+                tracked_order.trade_type is TradeType.BUY
+                and position_side == "Buy"
+                or tracked_order.trade_type is TradeType.SELL
+                and position_side == "Sell"
             )
-            return
-        current_state = order_msg["status"]
-        tracked_order.update_exchange_order_id(str(order_msg["order"]["oid"]))
-        order_update: OrderUpdate = OrderUpdate(
-            trading_pair=tracked_order.trading_pair,
-            update_timestamp=order_msg["statusTimestamp"] * 1e-3,
-            new_state=CONSTANTS.ORDER_STATE[current_state],
-            client_order_id=order_msg["order"]["cloid"],
-            exchange_order_id=str(order_msg["order"]["oid"]),
+            else PositionAction.CLOSE
         )
-        self._order_tracker.process_order_update(order_update=order_update)
+
+        flat_fees = (
+            []
+            if fee_amount == Decimal("0")
+            else [TokenAmount(amount=fee_amount, token=fee_asset)]
+        )
+
+        fee = TradeFeeBase.new_perpetual_fee(
+            fee_schema=self.trade_fee_schema(),
+            position_action=position_action,
+            percent_token=fee_asset,
+            flat_fees=flat_fees,
+        )
+
+        exec_price = (
+            Decimal(trade_msg["execPrice"])
+            if "execPrice" in trade_msg
+            else Decimal(trade_msg["orderPrice"])
+        )
+        exec_time = float(trade_msg["execTime"]) / 1e3
+
+        trade_update: TradeUpdate = TradeUpdate(
+            trade_id=trade_id,
+            client_order_id=tracked_order.client_order_id,
+            exchange_order_id=str(trade_msg["orderId"]),
+            trading_pair=tracked_order.trading_pair,
+            fill_timestamp=exec_time,
+            fill_price=exec_price,
+            fill_base_amount=Decimal(trade_msg["execQty"]),
+            fill_quote_amount=exec_price * Decimal(trade_msg["execQty"]),
+            fee=fee,
+        )
+
+        return trade_update
+
+    def _process_order_event_message(self, order_msg: Dict[str, Any]):
+        """
+        Updates in-flight order and triggers cancellation or failure event if needed.
+        :param order_msg: The order event message payload
+        """
+        order_status = CONSTANTS.ORDER_STATUSES[order_msg["orderStatus"]]
+        client_order_id = str(order_msg["orderLinkId"])
+        updatable_order = self._order_tracker.all_updatable_orders.get(client_order_id)
+
+        if updatable_order is not None:
+            new_order_update: OrderUpdate = OrderUpdate(
+                trading_pair=updatable_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=order_status,
+                client_order_id=client_order_id,
+                exchange_order_id=order_msg["orderId"],
+            )
+            self._order_tracker.process_order_update(new_order_update)
 
     async def _format_trading_rules(
-        self, exchange_info_list: List[Dict]
+        self, exchange_info_list: List[Dict[str, Any]]
     ) -> List[TradingRule]:
         trading_rules: List[TradingRule] = []
 
@@ -816,7 +734,9 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             raise
         return trading_rules
 
-    def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: List):
+    def _initialize_trading_pair_symbols_from_exchange_info(
+        self, exchange_info: List[Dict[str, Any]]
+    ):
         mapping = bidict()
         for symbol_data in exchange_info:
             exchange_symbol = symbol_data["symbol"]
@@ -868,97 +788,25 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     async def _get_last_traded_price(self, trading_pair: str) -> float:
         market_addr = await self.market_address_associated_to_pair(trading_pair)
-
         response = await self._api_get(
-            path_url=f"{CONSTANTS.MARKET_CANDLES_STATS}/{market_addr}",
+            path_url=f"{CONSTANTS.MARKET_STATS}/{market_addr}",
         )
-
-        return float(response.get("current_price", 0.0))
-
-    async def _update_balances(self):
-        """
-        Calls the REST API to update total and available balances.
-        """
-
-        account_info = await self._api_get(
-            path_url=CONSTANTS.USER_PORTFOLIO,
-            is_auth_required=True,
-        )
-
-        quote = CONSTANTS.CURRENCY
-        summary: Dict[str, Any] = account_info["summary"]
-        total_balance: str = summary.get("total_balance", "0")
-        available_balance: str = summary.get("total_available_balance", "0")
-
-        self._account_balances[quote] = (
-            Decimal(total_balance) / CONSTANTS.CURRENCY_DECIMALS
-        )
-        self._account_available_balances[quote] = (
-            Decimal(available_balance) / CONSTANTS.CURRENCY_DECIMALS
-        )
-
-    async def _update_positions(self):
-        positions = await self._api_get(
-            path_url=CONSTANTS.USER_POSITIONS,
-            is_auth_required=True,
-        )
-
-        if not positions:
-            for key in list(self._perpetual_trading.account_positions.keys()):
-                self._perpetual_trading.remove_position(key)
-            return
-
-        for pos in positions:
-            market_addr = pos.get("market_addr")
-            trading_pair = self.trading_pair_associated_to_market_address(market_addr)
-            market_info = self._trading_rules.get(trading_pair, None)
-            if not market_info:
-                raise IOError("Missing the market info for the active position")
-
-            ex_trading_pair = market_info["symbol"]
-            hb_trading_pair = await self.trading_pair_associated_to_exchange_symbol(
-                ex_trading_pair
-            )
-
-            position_side = (
-                PositionSide.LONG if pos.get("side") == "long" else PositionSide.SHORT
-            )
-
-            amount = abs(Decimal(pos.get("size", 0)))
-            entry_price = Decimal(pos.get("entry_price", 0))
-            unrealized_pnl = Decimal(pos.get("unrealized_pnl", 0))
-            leverage = Decimal(pos.get("leverage", 1))
-
-            pos_key = self._perpetual_trading.position_key(
-                hb_trading_pair, position_side
-            )
-
-            if amount > 0:
-                _position = Position(
-                    trading_pair=hb_trading_pair,
-                    position_side=position_side,
-                    unrealized_pnl=unrealized_pnl,
-                    entry_price=entry_price,
-                    amount=amount,
-                    leverage=leverage,
-                )
-                self._perpetual_trading.set_position(pos_key, _position)
-            else:
-                self._perpetual_trading.remove_position(pos_key)
-
-    async def _get_position_mode(self) -> Optional[PositionMode]:
-        return PositionMode.ONEWAY
+        return float(response["current_price"])
 
     async def _trading_pair_position_mode_set(
         self, mode: PositionMode, trading_pair: str
     ) -> Tuple[bool, str]:
-        msg = ""
-        success = True
-        initial_mode = await self._get_position_mode()
-        if initial_mode != mode:
-            msg = "ekiden only supports the ONEWAY position mode."
-            success = False
-        return success, msg
+        if mode != PositionMode.ONEWAY:
+            self.logger().warning(
+                f"ekiden only supports the ONEWAY position modesupplied mode: {mode}",
+            )
+            return False, f"Invalid position mode: {mode}"
+        else:
+            self.logger().debug(
+                f"ekiden switching position mode to "
+                f"{mode} for {trading_pair} succeeded."
+            )
+            return True, "Success"
 
     async def _set_trading_pair_leverage(
         self, trading_pair: str, leverage: int
@@ -967,7 +815,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         market_addr = await self.market_address_associated_to_pair(trading_pair)
         nonce = self._nonce_provider.get_tracking_nonce()
         payload = {
-            "type": "leverage_assign",
+            "type": IntentType.LEVERAGE_ASSIGN.value,
             "market_addr": market_addr,
             "leverage": leverage,
         }
@@ -987,13 +835,11 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 data=data,
                 is_auth_required=True,
             )
-            statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-            if not statuses:
-                return False, "No status returned from leverage assignment"
-            status_info = statuses[0]
-            if "error" in status_info:
-                return False, status_info["error"]
-            if "success" in status_info:
+            output = result.get("output", {})
+            if not output:
+                return False, "No output data in response"
+            sid = output.get("sid", "")
+            if sid:
                 return True, "Leverage assigned successfully"
             return False, "Unknown response from leverage assignment"
         except Exception as e:
@@ -1003,40 +849,27 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self, trading_pair: str
     ) -> Tuple[int, Decimal, Decimal]:
         market_addr = await self.market_address_associated_to_pair(trading_pair)
-
-        positions = await self._api_get(
-            path_url=CONSTANTS.USER_POSITIONS, params={"market_addr": market_addr}
+        if not market_addr:
+            return 0, Decimal("-1"), Decimal("-1")
+        positions: List[Dict[str, Any]] = await self._api_get(
+            path_url=CONSTANTS.USER_POSITIONS,
+            params={"market_addr": market_addr},
+            is_auth_required=True,
         )
-
         if not positions:
             return 0, Decimal("-1"), Decimal("-1")
-
         position = positions[0]
-
         current_funding_index = Decimal(position.get("funding_index", 0))
         entry_funding_index = Decimal(
             position.get("entry_funding_index", current_funding_index)
         )
-
         size = Decimal(position.get("size", 0))
-        side = position.get("side", "buy")
-
+        side = position.get("side", OrderSide.BUY.value)
         funding_index_diff = current_funding_index - entry_funding_index
-
-        multiplier = Decimal(1) if side == "buy" else Decimal(-1)
-
+        multiplier = Decimal(1) if side == OrderSide.BUY.value else Decimal(-1)
         payment = size * funding_index_diff * multiplier
         funding_rate = funding_index_diff * multiplier
-
         timestamp = int(position.get("timestamp_ms", 0))
-
         if payment == Decimal("0"):
             return 0, Decimal("-1"), Decimal("-1")
-
         return timestamp, funding_rate, payment
-
-    def _last_funding_time(self) -> int:
-        """
-        Funding settlement occurs every 1 hour as mentioned in https://ekiden.gitbook.io/ekiden-docs/trading/funding
-        """
-        return int(((time.time() // 3600) - 1) * 3600 * 1e3)

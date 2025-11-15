@@ -21,29 +21,26 @@ class EkidenPerpetualAuth(AuthBase):
     def __init__(self, aptos_private_key: str):
         self._root_private_key = aptos_private_key
         self._root_account = Account.load_key(self._root_private_key)
-        self.trading_account = None
-        self.trading_address = None
+        self.trading_account: Optional[Account] = None
+        self.trading_address: Optional[str] = None
         self.pub_key = None
         self._token = None
         self.derive_trading_acc()
 
-    @property
-    def auth_token(self) -> Optional[str]:
-        if not self._token:
-            raise ValueError("Auth token not initialized yet")
-        return self._token
-
+    # TODO: Add auth error handling and token refetching
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
         if self._token is None:
-            self._token = await self.get_auth_token()
+            await self.get_auth_token()
         request.headers = request.headers or {"Content-Type": "application/json"}
-        request.headers["Authorization"] = f"Bearer {self._token}"
+        request.headers.update({"Authorization": f"Bearer {self._token}"})
         return request
 
     async def ws_authenticate(self, request: WSRequest) -> WSRequest:
         return request
 
     async def get_auth_token(self) -> str:
+        if self._token:
+            return self._token
         url = f"{PERPETUAL_BASE_URL}{API_VERSION}{AUTH_URL}"
         timestamp_ms = int(time.time() * 1000)
 
@@ -72,7 +69,8 @@ class EkidenPerpetualAuth(AuthBase):
             json_resp = await response.json()
 
         token = json_resp.get("token")
-        return token
+        self._token = token
+        return self._token
 
     def derive_trading_acc(self, nonce: int = 0) -> None:
         DERIVATION_PREFIX = "APTOS\nmessage: Ekiden Trading\nnonce: "

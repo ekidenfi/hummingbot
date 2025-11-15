@@ -4,11 +4,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants as CONSTANTS
+from hummingbot.connector.derivative.ekiden_perpetual import ekiden_perpetual_constants as CONSTANTS
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants import OrderSide
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.core.data_type.funding_info import FundingInfo, FundingInfoUpdate
-from hummingbot.core.data_type.order_book_message import OrderBookMessage, OrderBookMessageType
+from hummingbot.core.data_type.order_book import OrderBookMessage
+from hummingbot.core.data_type.order_book_message import OrderBookMessageType
 from hummingbot.core.data_type.perpetual_api_order_book_data_source import PerpetualAPIOrderBookDataSource
+from hummingbot.core.utils.tracking_nonce import NonceCreator
 from hummingbot.core.web_assistant.connections.data_types import WSJSONRequest
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 from hummingbot.core.web_assistant.ws_assistant import WSAssistant
@@ -21,43 +24,54 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     def __init__(
         self,
         trading_pairs: List[str],
-        api_factory: WebAssistantsFactory,
         connector: "EkidenPerpetualDerivative",
+        api_factory: WebAssistantsFactory,
         domain: str = CONSTANTS.DOMAIN,
     ):
         super().__init__(trading_pairs)
-        self._api_factory = api_factory
         self._connector = connector
-        self.domain = domain
+        self._api_factory = api_factory
+        self._domain = domain
+        self._nonce_provider = NonceCreator.for_microseconds()
 
     async def get_last_traded_prices(
-        self, trading_pairs: List[str]
+        self, trading_pairs: List[str], domain: Optional[str] = None
     ) -> Dict[str, float]:
         return await self._connector.get_last_traded_prices(trading_pairs=trading_pairs)
 
-    async def _request_order_book_snapshot(self):
-        raise NotImplementedError
-
-    async def _order_book_snapshot(self):
-        self.logger().warning(
-            f"Order book snapshots are not supported for {self._connector.name}"
+    async def get_funding_info(self, trading_pair: str) -> FundingInfo:
+        symbol = await self._connector.exchange_symbol_associated_to_pair(
+            trading_pair=trading_pair
         )
-        raise NotImplementedError
+        response: Dict[str, Any] = await self._request_pair_funding_info(symbol)
 
-    async def _connected_websocket_assistant(self) -> WSAssistant:
-        url = f"{CONSTANTS.PERPETUAL_WS_URL}{CONSTANTS.WS_PUBLIC}"
-        ws: WSAssistant = await self._api_factory.get_ws_assistant()
-        await ws.connect(ws_url=url, ping_timeout=CONSTANTS.HEARTBEAT_TIME_INTERVAL)
-        return ws
+        timestamp_str = response["next_funding_time"]
+        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        unix_ts = dt.timestamp()
+        unix_ts_ms = int(unix_ts * 1000)
+
+        funding_info = FundingInfo(
+            trading_pair=trading_pair,
+            index_price=Decimal(response["oracle_price"]),
+            mark_price=Decimal(response["mark_price"]),
+            next_funding_utc_timestamp=unix_ts_ms,
+            rate=Decimal(response["funding_rate_raw"]),
+        )
+        return funding_info
+
+    async def _request_pair_funding_info(self, trading_pair: str) -> Dict[str, Any]:
+        market_addr = await self._connector.market_address_associated_to_pair(
+            trading_pair
+        )
+        path_url = CONSTANTS.MARKET_FUNDING + f"/{market_addr}"
+
+        data = await self._connector._api_get(
+            path_url=path_url, limit_id=CONSTANTS.MARKET_FUNDING
+        )
+        return data
 
     async def _subscribe_channels(self, ws: WSAssistant):
-        """
-        Subscribes to the trade events and diff orders events through the provided websocket connection.
-
-        :param ws: the websocket assistant used to connect to the exchange
-        """
         try:
-            id = int(time.time())
             for trading_pair in self._trading_pairs:
                 market_addr = await self._connector.market_address_associated_to_pair(
                     trading_pair=trading_pair
@@ -65,17 +79,17 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                 order_book_payload = {
                     "op": "subscribe",
                     "args": [f"orderbook/{market_addr}"],
-                    "req_id": f"{id}",
+                    "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
                 }
                 trades_payload = {
                     "op": "subscribe",
                     "args": [f"trade/{market_addr}"],
-                    "req_id": f"{id + 1}",
+                    "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
                 }
                 ticker_payload = {
                     "op": "subscribe",
                     "args": [f"ticker/{market_addr}"],
-                    "req_id": f"{id + 2}",
+                    "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
                 }
 
                 subscribe_orderbook_request: WSJSONRequest = WSJSONRequest(
@@ -101,36 +115,41 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             )
             raise
 
+    async def _process_websocket_messages(self, websocket_assistant: WSAssistant):
+        while True:
+            try:
+                await super()._process_websocket_messages(
+                    websocket_assistant=websocket_assistant
+                )
+            except asyncio.TimeoutError:
+                ping_request = WSJSONRequest(payload={"op": "ping"})
+                await websocket_assistant.send(ping_request)
+
     def _channel_originating_message(self, event_message: Dict[str, Any]) -> str:
-        logger = self.logger()
         channel = ""
-        topic: Optional[str] = None
 
         op = event_message["op"]
         match op:
             case "subscribed":
-                args = event_message["args"]
-                logger.info(f"Subscribed to {args} successfully")
-            case "unsubscribed":
                 pass
+            case "unsubscribed":
+                self.logger().info("Unsubscribed")
             case "pong":
-                logger.info("Received pong")
+                self.logger().info("Received pong")
             case "error":
                 msg = event_message["message"]
-                logger.error(f"Error from order book ws_stream: , msg={msg}")
+                self.logger().error(f"Error from order book ws_stream: , msg={msg}")
             case "event":
-                logger.info("Received event")
                 topic: str = event_message["topic"].split("/")[0]
+                match topic:
+                    case CONSTANTS.WS_TRADES:
+                        channel = self._trade_messages_queue_key
+                    case CONSTANTS.WS_ORDERBOOK:
+                        channel = self._diff_messages_queue_key
+                    case CONSTANTS.WS_TICKER:
+                        channel = self._funding_info_messages_queue_key
             case "_":
-                logger.warning(f"Unrecognized order book ws_stream op: {op}")
-
-        match topic:
-            case CONSTANTS.WS_TRADES:
-                channel = self._trade_messages_queue_key
-            case CONSTANTS.WS_ORDERBOOK:
-                channel = self._diff_messages_queue_key
-            case CONSTANTS.WS_TICKER:
-                channel = self._funding_info_messages_queue_key
+                self.logger().warning(f"Unrecognized order book ws_stream op: {op}")
 
         return channel
 
@@ -173,7 +192,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                     "trading_pair": trading_pair,
                     "trade_type": (
                         float(TradeType.SELL.value)
-                        if trade["side"] == "sell"
+                        if trade["side"] == OrderSide.SELL.value
                         else float(TradeType.BUY.value)
                     ),
                     "trade_id": trade["id"],
@@ -190,7 +209,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     ):
         data = raw_message["data"]
         trading_pair = await self._connector.trading_pair_associated_to_market_address(
-            raw_message["market_addr"]
+            data["market_addr"]
         )
 
         funding_info_update = FundingInfoUpdate(
@@ -202,35 +221,24 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         )
         message_queue.put_nowait(funding_info_update)
 
-    async def get_funding_info(self, trading_pair: str) -> FundingInfo:
-        symbol = await self._connector.exchange_symbol_associated_to_pair(
-            trading_pair=trading_pair
+    async def _order_book_snapshot(self, trading_pair: str) -> OrderBookMessage:
+        snapshot_msg: OrderBookMessage = OrderBookMessage(
+            OrderBookMessageType.SNAPSHOT,
+            {
+                "trading_pair": trading_pair,
+                "update_id": 0,
+                "bids": [],
+                "asks": [],
+            },
+            timestamp=time.time(),
         )
-        response: List = await self._request_pair_funding_info(symbol)
+        return snapshot_msg
 
-        timestamp_str = response[0]["next_funding_time"]
-        dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        unix_ts = dt.timestamp()
-        unix_ts_ms = int(unix_ts * 1000)
+    async def _request_order_book_snapshot(self, trading_pair: str):
+        pass  # unused
 
-        funding_info = FundingInfo(
-            trading_pair=trading_pair,
-            index_price=Decimal(response[0]["oracle_price"]),
-            mark_price=Decimal(response[0]["mark_price"]),
-            next_funding_utc_timestamp=unix_ts_ms,
-            rate=Decimal(response[0]["funding_rate_raw"]),
-        )
-        return funding_info
-
-    async def _request_pair_funding_info(self, trading_pair: str):
-        data = await self._connector._api_get(
-            path_url=CONSTANTS.MARKET_FUNDING,
-            params={"symbol": trading_pair},
-        )
-        return data
-
-    def _next_funding_time(self) -> int:
-        """
-        Funding settlement occurs every 1 hours as mentioned in https://docs.ekiden.fi/api-reference/integration/pnl-margin-fr
-        """
-        return int(((time.time() // 3600) + 1) * 3600)
+    async def _connected_websocket_assistant(self) -> WSAssistant:
+        ws = await self._api_factory.get_ws_assistant()
+        url = f"{CONSTANTS.PERPETUAL_WS_URL}{CONSTANTS.WS_PUBLIC}"
+        await ws.connect(ws_url=url)
+        return ws

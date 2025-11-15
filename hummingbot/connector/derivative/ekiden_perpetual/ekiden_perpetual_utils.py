@@ -1,5 +1,5 @@
+import time
 from decimal import Decimal
-from typing import Any, Dict
 
 from pydantic import Field, SecretStr
 
@@ -9,20 +9,21 @@ from hummingbot.core.data_type.trade_fee import TradeFeeSchema
 DEFAULT_FEES = TradeFeeSchema(
     maker_percent_fee_decimal=Decimal("0"),
     taker_percent_fee_decimal=Decimal("0.02"),
-    buy_percent_fee_deducted_from_returns=True,
 )
 
 CENTRALIZED = True
 EXAMPLE_PAIR = "BTC-WUSDC"
 
 
-def is_exchange_information_valid(rule: Dict[str, Any]) -> bool:
+def get_funding_timestamp(switch: bool = True) -> int:
     """
-    Verifies if a trading pair is enabled to operate with based on its exchange information
-    :param exchange_info: the exchange information for a trading pair
-    :return: True if the trading pair is enabled, False otherwise
+    Get funding timestamp (next funding or last one)
+    :param switch: selects next funding time or last
+
+    Funding settlement occurs every 1 hour as mentioned in https://ekiden.gitbook.io/ekiden-docs/trading/funding
     """
-    return True
+    next_or_last = 1 if switch else -1
+    return int(((time.time() // 3600) + next_or_last) * 3600 * 1e3)
 
 
 class EkidenPerpetualConfigMap(BaseConnectorConfigMap):
