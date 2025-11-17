@@ -49,11 +49,13 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         unix_ts = dt.timestamp()
         unix_ts_ms = int(unix_ts * 1000)
+        scaled_oracle_p = response["oracle_price"] / CONSTANTS.CURRENCY_DECIMALS
+        scaled_mark_p = response["mark_price"] / CONSTANTS.CURRENCY_DECIMALS
 
         funding_info = FundingInfo(
             trading_pair=trading_pair,
-            index_price=Decimal(response["oracle_price"]),
-            mark_price=Decimal(response["mark_price"]),
+            index_price=Decimal(scaled_oracle_p),
+            mark_price=Decimal(scaled_mark_p),
             next_funding_utc_timestamp=unix_ts_ms,
             rate=Decimal(response["funding_rate_raw"]),
         )
@@ -157,14 +159,17 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         self, raw_message: Dict[str, Any], message_queue: asyncio.Queue
     ):
         timestamp: float = raw_message["data"]["timestamp"] * 1e-3
+        market_addr = raw_message["data"]["market_addr"]
         trading_pair = await self._connector.trading_pair_associated_to_market_address(
-            raw_message["data"]["market_addr"]
+            market_addr
         )
+        trading_rule = self._connector.trading_rules[trading_pair]
         data = raw_message["data"]
-        bids = [(float(row[0]), float(row[1])) for row in data["bids"]]
-        asks = [(float(row[0]), float(row[1])) for row in data["asks"]]
-
-        order_book_message: OrderBookMessage = OrderBookMessage(
+        price_factor = float(trading_rule.min_price_increment)
+        amount_factor = float(trading_rule.min_base_amount_increment)
+        bids = [(row[0] * price_factor, row[1] * amount_factor) for row in data["bids"]]
+        asks = [(row[0] * price_factor, row[1] * amount_factor) for row in data["asks"]]
+        order_book_message = OrderBookMessage(
             OrderBookMessageType.DIFF,
             {
                 "trading_pair": trading_pair,
@@ -186,6 +191,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         )
 
         for trade in trades:
+            scaled_price = trade["price"] / CONSTANTS.CURRENCY_DECIMALS
             trade_message: OrderBookMessage = OrderBookMessage(
                 OrderBookMessageType.TRADE,
                 {
@@ -196,7 +202,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                         else float(TradeType.BUY.value)
                     ),
                     "trade_id": trade["id"],
-                    "price": float(trade["price"]),
+                    "price": float(scaled_price),
                     "amount": float(trade["size"]),
                 },
                 timestamp=trade["timestamp"] * 1e-3,
@@ -212,10 +218,13 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             data["market_addr"]
         )
 
+        scaled_index_p = data["index_price"] / CONSTANTS.CURRENCY_DECIMALS
+        scaled_mark_p = data["mark_price"] / CONSTANTS.CURRENCY_DECIMALS
+
         funding_info_update = FundingInfoUpdate(
             trading_pair=trading_pair,
-            index_price=Decimal(data["index_price"]),
-            mark_price=Decimal(data["mark_price"]),
+            index_price=Decimal(scaled_index_p),
+            mark_price=Decimal(scaled_mark_p),
             next_funding_utc_timestamp=data["next_funding_time"],
             rate=Decimal(data["funding_rate"]),
         )

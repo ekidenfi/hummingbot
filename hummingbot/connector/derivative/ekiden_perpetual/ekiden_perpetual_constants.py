@@ -53,7 +53,6 @@ class TimeInForce(Enum):
     IOC = "IOC"
     FOK = "FOK"
     POST_ONLY = "PostOnly"
-    ALO = "ALO"
 
 
 class TpSlMode(Enum):
@@ -221,7 +220,7 @@ RATE_LIMITS = [
     ),
 ]
 
-CURRENCY = "USDC"
+CURRENCY = "WUSDC"
 CURRENCY_DECIMALS = 10**6
 
 # Used for the intent signature generation
