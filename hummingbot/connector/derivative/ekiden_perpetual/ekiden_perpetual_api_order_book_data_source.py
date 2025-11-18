@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from hummingbot.connector.derivative.ekiden_perpetual import ekiden_perpetual_constants as CONSTANTS
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants import OrderSide
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_utils import get_scale_factors
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.core.data_type.funding_info import FundingInfo, FundingInfoUpdate
 from hummingbot.core.data_type.order_book import OrderBookMessage
@@ -164,11 +165,16 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             market_addr
         )
         trading_rule = self._connector.trading_rules[trading_pair]
+        price_factor, amount_factor = get_scale_factors(trading_rule, inverse=True)
         data = raw_message["data"]
-        price_factor = float(trading_rule.min_price_increment)
-        amount_factor = float(trading_rule.min_base_amount_increment)
-        bids = [(row[0] * price_factor, row[1] * amount_factor) for row in data["bids"]]
-        asks = [(row[0] * price_factor, row[1] * amount_factor) for row in data["asks"]]
+        bids = [
+            (row[0] * float(price_factor), row[1] * float(amount_factor))
+            for row in data["bids"]
+        ]
+        asks = [
+            (row[0] * float(price_factor), row[1] * float(amount_factor))
+            for row in data["asks"]
+        ]
         order_book_message = OrderBookMessage(
             OrderBookMessageType.DIFF,
             {

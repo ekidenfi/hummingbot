@@ -1,9 +1,11 @@
 import time
 from decimal import Decimal
+from typing import Tuple
 
 from pydantic import Field, SecretStr
 
 from hummingbot.client.config.config_data_types import BaseConnectorConfigMap
+from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.trade_fee import TradeFeeSchema
 
 DEFAULT_FEES = TradeFeeSchema(
@@ -13,6 +15,27 @@ DEFAULT_FEES = TradeFeeSchema(
 
 CENTRALIZED = True
 EXAMPLE_PAIR = "BTC-WUSDC"
+
+
+def get_scale_factors(
+    trading_rule: "TradingRule", inverse: bool = False
+) -> Tuple[Decimal, Decimal]:
+    """
+    Returns precise Decimal scale factors for price and amount based on trading rule increments.
+
+    Args:
+        trading_rule: TradingRule object with min_price_increment and min_base_amount_increment
+        inverse: if True, returns the inverse of the scale factors
+
+    Returns:
+        Tuple of (price_factor, amount_factor) as Decimals
+    """
+    price_factor = Decimal("1") / trading_rule.min_price_increment
+    amount_factor = Decimal("1") / trading_rule.min_base_amount_increment
+    if inverse:
+        price_factor = Decimal("1") / price_factor
+        amount_factor = Decimal("1") / amount_factor
+    return price_factor, amount_factor
 
 
 def get_funding_timestamp(switch: bool = True) -> int:

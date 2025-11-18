@@ -22,6 +22,7 @@ from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_user_stream_data_source import (
     EkidenPerpetualUserStreamDataSource,
 )
+from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_utils import get_scale_factors
 from hummingbot.connector.derivative.position import Position
 from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativePyBase
 from hummingbot.connector.trading_rule import TradingRule
@@ -247,6 +248,8 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             self.logger().info(f"Order {order_id} cancelled successfully (SID={sid})")
             return True
         except Exception as e:
+            if self.is_order_not_active(e):
+                return True
             self.logger().exception(f"Error parsing cancel response: {e}")
             raise IOError(f"Cancel request failed: {e}")
 
@@ -273,11 +276,8 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             if order_type.is_limit_type()
             else OrderTypeString.MARKET.value
         )
-
         trading_rule = self.trading_rules[trading_pair]
-        price_factor = int(1 / trading_rule.min_price_increment)
-        amount_factor = int(1 / trading_rule.min_base_amount_increment)
-
+        price_factor, amount_factor = get_scale_factors(trading_rule)
         payload = {
             "type": IntentType.ORDER_CREATE.value,
             "orders": [
@@ -386,7 +386,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                     path_url=CONSTANTS.USER_FILLS, is_auth_required=True
                 )
                 for trade_fill in all_fills_response:
-                    self._process_trade_event_message(trade_fill)
+                    self._process_trade_message(trade_fill)
             except asyncio.CancelledError:
                 raise
             except Exception as request_error:
@@ -412,8 +412,37 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             order for order in exchange_orders if order["sid"] in active_orders_ids
         ]
 
-        for order in valid_orders:
-            self._process_order_event_message(order)
+        for order_data in valid_orders:
+            self._process_order_update(order_data)
+
+    def _process_order_update(self, order_data: Dict[str, Any]):
+        """
+        Updates in-flight order and triggers cancellation or failure event if needed.
+        :param order_msg: The order event message payload
+        """
+        order_status = CONSTANTS.ORDER_STATUSES[order_data["status"]]
+        exch_order_id = order_data["sid"]
+        client_order_id = order_data.get("order-link-id", None)
+        if client_order_id:
+            updatable_order = self._order_tracker.all_updatable_orders.get(
+                client_order_id
+            )
+        else:
+            updatable_order = (
+                self._order_tracker.all_fillable_orders_by_exchange_order_id.get(
+                    exch_order_id
+                )
+            )
+
+        if updatable_order is not None:
+            new_order_update: OrderUpdate = OrderUpdate(
+                trading_pair=updatable_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=order_status,
+                client_order_id=client_order_id,
+                exchange_order_id=exch_order_id,
+            )
+            self._order_tracker.process_order_update(new_order_update)
 
     async def _update_balances(self):
         """
@@ -461,15 +490,14 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 raise IOError(
                     f"No known traiding pair for market address {market_addr}"
                 )
-            market_info = self._trading_rules.get(trading_pair, None)
-            if not market_info:
-                raise IOError("Missing the market info for the active position")
+            trading_rule = self.trading_rules[trading_pair]
+            price_factor, amount_factor = get_scale_factors(trading_rule, inverse=True)
             position_side = (
                 PositionSide.LONG if pos.get("side") == "long" else PositionSide.SHORT
             )
-            amount = abs(Decimal(pos.get("size", 0)))
-            entry_price = pos.get("entry_price", 0) / CONSTANTS.CURRENCY_DECIMALS
-            unrealized_pnl = Decimal(pos.get("unrealized_pnl", 0))
+            amount = pos.get("size", 0) * amount_factor
+            entry_price = pos.get("entry_price", 0) * price_factor
+            unrealized_pnl = pos.get("unrealized_pnl", 0) * price_factor
             leverage = pos.get("leverage", 1)
             pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
             if amount > 0:
@@ -477,7 +505,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                     trading_pair=trading_pair,
                     position_side=position_side,
                     unrealized_pnl=unrealized_pnl,
-                    entry_price=Decimal(entry_price),
+                    entry_price=entry_price,
                     amount=amount,
                     leverage=Decimal(leverage if leverage else 1),
                 )
@@ -538,24 +566,24 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         """
         async for event_message in self._iter_user_event_queue():
             try:
-                channel: Optional[str] = event_message.get("channel", None)
+                topic: Optional[str] = event_message.get("topic", None)
                 results = event_message.get("data", [])
-                if channel not in CONSTANTS.PRIVATE_TOPICS:
-                    self.logger().error(
+                if topic not in CONSTANTS.PRIVATE_TOPICS:
+                    self.logger().warning(
                         f"Unexpected message in user stream: {event_message}.",
                         exc_info=True,
                     )
                     continue
-                match channel:
+                match topic:
                     case CONSTANTS.WS_USER_ORDER:
                         for order_msg in results:
                             self._process_order_message(order_msg)
                     case CONSTANTS.WS_USER_FILL:
                         for trade_msg in results["fills"]:
-                            await self._process_trade_message(trade_msg)
+                            self._process_trade_message(trade_msg)
                     case CONSTANTS.WS_USER_POSITION:
                         for position_msg in results:
-                            await self._process_account_position_event(position_msg)
+                            await self._process_position_message(position_msg)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -564,46 +592,36 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 )
                 await self._sleep(5.0)
 
-    async def _process_account_position_event(self, position_msg: Dict[str, Any]):
+    def _process_order_message(self, order_msg: Dict[str, Any]):
         """
-        Updates position
-        :param position_msg: The position event message payload
+        Updates in-flight order and triggers cancellation or failure event if needed.
+        :param order_msg: The order event message payload
         """
-        ex_trading_pair = position_msg["symbol"]
-        trading_pair = await self.trading_pair_associated_to_exchange_symbol(
-            symbol=ex_trading_pair
-        )
-        position_side = (
-            PositionSide.LONG if position_msg["side"] == "Buy" else PositionSide.SHORT
-        )
-        position_value = Decimal(str(position_msg["positionValue"]))
-        entry_price = position_msg["entryPrice"] / CONSTANTS.CURRENCY_DECIMALS
-        amount = Decimal(str(position_msg["size"]))
-        leverage = Decimal(str(position_msg["leverage"]))
-        unrealized_pnl = position_value - (amount * entry_price * leverage)
-        pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
-        if amount != s_decimal_0:
-            position = Position(
-                trading_pair=trading_pair,
-                position_side=position_side,
-                unrealized_pnl=unrealized_pnl,
-                entry_price=Decimal(entry_price),
-                amount=amount
-                * (
-                    Decimal("-1.0")
-                    if position_side == PositionSide.SHORT
-                    else Decimal("1.0")
-                ),
-                leverage=leverage,
+        order_status = CONSTANTS.ORDER_STATUSES[order_msg["status"]]
+        exch_order_id = order_msg["sid"]
+        client_order_id = order_msg.get("order-link-id", None)
+        if client_order_id:
+            updatable_order = self._order_tracker.all_updatable_orders.get(
+                client_order_id
             )
-            self._perpetual_trading.set_position(pos_key, position)
         else:
-            self._perpetual_trading.remove_position(pos_key)
+            updatable_order = (
+                self._order_tracker.all_fillable_orders_by_exchange_order_id.get(
+                    exch_order_id
+                )
+            )
 
-        # Trigger balance update because Ekiden doesn't have balance updates through the websocket
-        safe_ensure_future(self._update_balances())
+        if updatable_order is not None:
+            new_order_update: OrderUpdate = OrderUpdate(
+                trading_pair=updatable_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=order_status,
+                client_order_id=client_order_id,
+                exchange_order_id=exch_order_id,
+            )
+            self._order_tracker.process_order_update(new_order_update)
 
-    def _process_trade_event_message(self, trade_msg: Dict[str, Any]) -> None:
+    def _process_trade_message(self, trade_msg: Dict[str, Any]) -> None:
         """
         Update in-flight order and trigger order filled event for a received trade message.
         Triggers order completed event if the total executed amount equals the specified order amount.
@@ -643,85 +661,95 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def _parse_trade_update(
         self, trade_msg: Dict, tracked_order: InFlightOrder
     ) -> TradeUpdate:
-        trade_id: str = str(trade_msg["execId"])
-
+        trading_rule = self.trading_rules[tracked_order.trading_pair]
+        price_factor, amount_factor = get_scale_factors(trading_rule, inverse=True)
+        trade_id = trade_msg["sid"]
+        is_maker = tracked_order.exchange_order_id == trade_msg.get("maker_order_sid")
         fee_asset = tracked_order.quote_asset
-        fee_amount = Decimal(trade_msg["execFee"])
+        fee = trade_msg["maker_fee"] if is_maker else trade_msg["taker_fee"]
+        fee_amount = fee * price_factor
         position_side = trade_msg["side"]
         position_action = (
             PositionAction.OPEN
             if (
-                tracked_order.trade_type is TradeType.BUY
-                and position_side == "Buy"
-                or tracked_order.trade_type is TradeType.SELL
-                and position_side == "Sell"
+                (
+                    tracked_order.trade_type is TradeType.BUY
+                    and position_side.lower() == "buy"
+                )
+                or (
+                    tracked_order.trade_type is TradeType.SELL
+                    and position_side.lower() == "sell"
+                )
             )
             else PositionAction.CLOSE
         )
-
         flat_fees = (
             []
             if fee_amount == Decimal("0")
             else [TokenAmount(amount=fee_amount, token=fee_asset)]
         )
-
         fee = TradeFeeBase.new_perpetual_fee(
             fee_schema=self.trade_fee_schema(),
             position_action=position_action,
             percent_token=fee_asset,
             flat_fees=flat_fees,
         )
-
-        raw_price = (
-            trade_msg["execPrice"]
-            if "execPrice" in trade_msg
-            else trade_msg["orderPrice"]
+        exec_price = trade_msg["price"] * price_factor
+        exec_base_amount = trade_msg["size"] * amount_factor
+        exec_quote_amount = exec_price * exec_base_amount
+        exec_time = float(trade_msg["timestamp_ms"])
+        exchange_order_id = (
+            trade_msg["maker_order_sid"] if is_maker else trade_msg["taker_order_sid"]
         )
-        exec_price = raw_price / CONSTANTS.CURRENCY_DECIMALS
-        exec_time = float(trade_msg["execTime"]) / 1e3
-
         trade_update: TradeUpdate = TradeUpdate(
             trade_id=trade_id,
             client_order_id=tracked_order.client_order_id,
-            exchange_order_id=str(trade_msg["orderId"]),
+            exchange_order_id=exchange_order_id,
             trading_pair=tracked_order.trading_pair,
             fill_timestamp=exec_time,
-            fill_price=Decimal(exec_price),
-            fill_base_amount=Decimal(trade_msg["execQty"]),
-            fill_quote_amount=exec_price * Decimal(trade_msg["execQty"]),
+            fill_price=exec_price,
+            fill_base_amount=exec_base_amount,
+            fill_quote_amount=exec_quote_amount,
             fee=fee,
         )
-
         return trade_update
 
-    def _process_order_event_message(self, order_msg: Dict[str, Any]):
+    async def _process_position_message(self, position_msg: Dict[str, Any]):
         """
-        Updates in-flight order and triggers cancellation or failure event if needed.
-        :param order_msg: The order event message payload
+        Updates position
         """
-        order_status = CONSTANTS.ORDER_STATUSES[order_msg["status"]]
-        exch_order_id = order_msg["sid"]
-        client_order_id = order_msg.get("order-link-id", None)
-        if client_order_id:
-            updatable_order = self._order_tracker.all_updatable_orders.get(
-                client_order_id
+        market_address = position_msg["market_addr"]
+        trading_pair = await self.trading_pair_associated_to_market_address(
+            market_address
+        )
+        if not trading_pair:
+            raise IOError(f"No trading pair associated to market: {market_address}")
+        trading_rule = self.trading_rules[trading_pair]
+        price_factor, amount_factor = get_scale_factors(trading_rule, inverse=True)
+        position_side = (
+            PositionSide.LONG
+            if position_msg["side"].lower() == "buy"
+            else PositionSide.SHORT
+        )
+        amount = position_msg["size"] * amount_factor
+        entry_price = position_msg["entry_price"] * price_factor
+        leverage = position_msg.get("leverage", 1)
+        unrealized_pnl = Decimal(position_msg["unrealized_pnl"]) * price_factor
+        pos_key = self._perpetual_trading.position_key(trading_pair, position_side)
+        if amount != s_decimal_0:
+            position = Position(
+                trading_pair=trading_pair,
+                position_side=position_side,
+                unrealized_pnl=unrealized_pnl,
+                entry_price=entry_price,
+                amount=amount,
+                leverage=Decimal(leverage if leverage else 1),
             )
+            self._perpetual_trading.set_position(pos_key, position)
         else:
-            updatable_order = (
-                self._order_tracker.all_fillable_orders_by_exchange_order_id.get(
-                    exch_order_id
-                )
-            )
-
-        if updatable_order is not None:
-            new_order_update: OrderUpdate = OrderUpdate(
-                trading_pair=updatable_order.trading_pair,
-                update_timestamp=self.current_timestamp,
-                new_state=order_status,
-                client_order_id=client_order_id,
-                exchange_order_id=exch_order_id,
-            )
-            self._order_tracker.process_order_update(new_order_update)
+            self._perpetual_trading.remove_position(pos_key)
+        # Ekiden WS does not push balances
+        safe_ensure_future(self._update_balances())
 
     async def _format_trading_rules(
         self, exchange_info_list: List[Dict[str, Any]]
@@ -741,7 +769,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 )
                 base_decimals = int(market.get("base_decimals", 0))
                 quote_decimals = int(market.get("quote_decimals", 0))
-                min_order_size = Decimal(str(market.get("min_order_size", 1))) / (
+                min_order_size = Decimal(market.get("min_order_size", 1)) / (
                     Decimal(10) ** base_decimals
                 )
                 min_price_increment = Decimal(10) ** (-quote_decimals)
@@ -818,10 +846,11 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     async def _get_last_traded_price(self, trading_pair: str) -> float:
         market_addr = await self.market_address_associated_to_pair(trading_pair)
-        response = await self._api_get(
-            path_url=f"{CONSTANTS.MARKET_STATS}/{market_addr}",
-        )
-        return float(response["current_price"] / CONSTANTS.CURRENCY_DECIMALS)
+        trading_rule = self.trading_rules[trading_pair]
+        price_factor, _ = get_scale_factors(trading_rule, inverse=True)
+        path_url = CONSTANTS.MARKET_STATS.format(market_addr=market_addr)
+        response = await self._api_get(path_url=path_url)
+        return float(response["current_price"] * price_factor)
 
     async def _trading_pair_position_mode_set(
         self, mode: PositionMode, trading_pair: str
@@ -903,3 +932,9 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         if payment == Decimal("0"):
             return 0, Decimal("-1"), Decimal("-1")
         return timestamp, funding_rate, payment
+
+    @staticmethod
+    def is_order_not_active(e: Exception) -> bool:
+        if CONSTANTS.ORDER_NOT_ACTIVE_MSG in str(e):
+            return True
+        return False

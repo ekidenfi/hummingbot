@@ -97,6 +97,7 @@ WS_USER_FILL = "fill"
 PRIVATE_TOPICS = [WS_USER_ORDER, WS_USER_POSITION, WS_USER_FILL]
 
 AUTH_ERROR = {"code": "UNAUTHORIZED", "message": "Unauthorized"}
+ORDER_NOT_ACTIVE_MSG = "status is not active, cannot be cancelled"
 
 HEARTBEAT_TIME_INTERVAL = 20.0
 FUNDING_INTERVAL_SECONDS = 3600
