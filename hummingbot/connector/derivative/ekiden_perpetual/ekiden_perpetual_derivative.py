@@ -54,7 +54,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         trading_required: bool = True,
         domain: str = CONSTANTS.DOMAIN,
     ):
-        self.aptos_private_key = aptos_private_key
+        self._aptos_private_key = aptos_private_key
         self._trading_required = trading_required
         self._trading_pairs = trading_pairs
         self._domain = domain
@@ -68,7 +68,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     @property
     def authenticator(self) -> EkidenPerpetualAuth:
-        return EkidenPerpetualAuth(self.aptos_private_key)
+        return EkidenPerpetualAuth(self._aptos_private_key, self._trading_required)
 
     @property
     def rate_limits_rules(self) -> List[RateLimit]:

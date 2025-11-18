@@ -18,13 +18,14 @@ from hummingbot.core.web_assistant.connections.rest_connection import RESTConnec
 
 
 class EkidenPerpetualAuth(AuthBase):
-    def __init__(self, aptos_private_key: str):
-        self._root_private_key = aptos_private_key
-        self._root_account = Account.load_key(self._root_private_key)
+    def __init__(self, aptos_private_key: str, is_trading_required: bool):
+        self._root_account = self.initialize_account(
+            aptos_private_key, is_trading_required
+        )
         self.trading_account: Optional[Account] = None
         self.trading_address: Optional[str] = None
-        self.pub_key = None
-        self._token = None
+        self.pub_key: Optional[str] = None
+        self._token: Optional[str] = None
         self.derive_trading_acc()
 
     # TODO: Add auth error handling and token refetching
@@ -71,6 +72,17 @@ class EkidenPerpetualAuth(AuthBase):
         token = json_resp.get("token")
         self._token = token
         return self._token
+
+    def initialize_account(
+        self, aptos_private_key: str, is_trading_required: bool
+    ) -> Account:
+        match bool(aptos_private_key), is_trading_required:
+            case False, False:
+                return Account.generate()
+            case False, True:
+                raise ValueError("Need a real private key for the trading")
+            case _:
+                return Account.load_key(aptos_private_key)
 
     def derive_trading_acc(self, nonce: int = 0) -> None:
         DERIVATION_PREFIX = "APTOS\nmessage: Ekiden Trading\nnonce: "

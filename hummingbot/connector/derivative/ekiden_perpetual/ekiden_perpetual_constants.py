@@ -6,8 +6,8 @@ from hummingbot.core.data_type.in_flight_order import OrderState
 DOMAIN = ""
 
 EXCHANGE_NAME = "ekiden_perpetual"
-PERPETUAL_BASE_URL = "https://api.staging.ekiden.fi"
-PERPETUAL_WS_URL = "wss://api.staging.ekiden.fi/ws"
+PERPETUAL_BASE_URL = "https://api.ekiden.fi"
+PERPETUAL_WS_URL = "wss://api.ekiden.fi/ws"
 
 BROKER_ID = "HBOT"
 
@@ -221,7 +221,7 @@ RATE_LIMITS = [
     ),
 ]
 
-CURRENCY = "WUSDC"
+CURRENCY = "USDC"
 CURRENCY_DECIMALS = 10**6
 
 # Used for the intent signature generation
