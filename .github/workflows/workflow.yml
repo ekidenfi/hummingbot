@@ -7,6 +7,10 @@ on:
     branches: [master, development, 'refactor/unit_tests**', 'epic/**']
     types: [ready_for_review, opened, synchronize, reopened]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   run_client:
     name: Check if client files changed
