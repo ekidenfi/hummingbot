@@ -115,6 +115,12 @@ RATE_LIMITS = [
         linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
     ),
     RateLimit(
+        MARKET_STATS,
+        limit=MAX_REQUEST,
+        time_interval=60,
+        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
+    ),
+    RateLimit(
         MARKET_FILLS,
         limit=MAX_REQUEST,
         time_interval=60,

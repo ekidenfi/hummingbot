@@ -60,6 +60,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._domain = domain
         self._last_trade_history_timestamp = None
         self._nonce_provider = NonceCreator.for_microseconds()
+        self._initialized_rules = False
         super().__init__(balance_asset_limit, rate_limits_share_pct)
 
     @property
@@ -198,6 +199,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._initialize_market_addresses_from_exchange_info(
             exchange_info=exchange_info
         )
+        self._initialized_rules = True
 
     def _is_request_exception_related_to_time_synchronizer(
         self, request_exception: Exception
@@ -845,12 +847,15 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             mapping.pop(current_exchange_symbol)
 
     async def _get_last_traded_price(self, trading_pair: str) -> float:
+        if not self._initialized_rules:
+            await self._update_trading_rules()
         market_addr = await self.market_address_associated_to_pair(trading_pair)
         trading_rule = self.trading_rules[trading_pair]
         price_factor, _ = get_scale_factors(trading_rule, inverse=True)
         path_url = CONSTANTS.MARKET_STATS.format(market_addr=market_addr)
-        response = await self._api_get(path_url=path_url)
-        return float(response["current_price"] * price_factor)
+        response = await self._api_get(path_url=path_url, limit_id=CONSTANTS.MARKET_STATS)
+        price = response.get("current_price") or 0
+        return float(price * price_factor)
 
     async def _trading_pair_position_mode_set(
         self, mode: PositionMode, trading_pair: str
