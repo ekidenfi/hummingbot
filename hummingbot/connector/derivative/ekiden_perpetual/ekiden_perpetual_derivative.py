@@ -1,4 +1,5 @@
 import asyncio
+import json
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -209,12 +210,27 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def _is_order_not_found_during_status_update_error(
         self, status_update_exception: Exception
     ) -> bool:
-        return False
+        code = self.extract_error_code(status_update_exception)
+        return code == CONSTANTS.ORDER_NOT_FOUND["code"]
 
     def _is_order_not_found_during_cancelation_error(
         self, cancelation_exception: Exception
     ) -> bool:
-        return False
+        code = self.extract_error_code(cancelation_exception)
+        return code in {
+            CONSTANTS.ORDER_NOT_ACTIVE["code"],
+            CONSTANTS.ORDER_NOT_FOUND["code"],
+        }
+
+    @staticmethod
+    def extract_error_code(exc: Exception) -> str | None:
+        msg = str(exc)
+        try:
+            json_part = msg[msg.index("{"): msg.rindex("}") + 1]
+            obj = json.loads(json_part)
+            return obj.get("code")
+        except Exception:
+            return None
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
         nonce = self._nonce_provider.get_tracking_nonce()
@@ -238,20 +254,17 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         )
         try:
             output = cancel_result.get("output")
-            if not output or "outputs" not in output or not output["outputs"]:
+            if not output or "outputs" not in output:
                 raise IOError(f"Unexpected cancel response format: {cancel_result}")
             sid = output["outputs"][0].get("sid")
             if not sid:
                 self.logger().debug(
                     f"Cancel failed for order {order_id}: no SID returned"
                 )
-                await self._order_tracker.process_order_not_found(order_id)
                 raise IOError(f"Cancel failed: no SID returned for order {order_id}")
             self.logger().info(f"Order {order_id} cancelled successfully (SID={sid})")
             return True
         except Exception as e:
-            if self.is_order_not_active(e):
-                return True
             self.logger().exception(f"Error parsing cancel response: {e}")
             raise IOError(f"Cancel request failed: {e}")
 
@@ -853,9 +866,11 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         trading_rule = self.trading_rules[trading_pair]
         price_factor, _ = get_scale_factors(trading_rule, inverse=True)
         path_url = CONSTANTS.MARKET_STATS.format(market_addr=market_addr)
-        response = await self._api_get(path_url=path_url, limit_id=CONSTANTS.MARKET_STATS)
-        price = response.get("current_price") or 0
-        return float(price * price_factor)
+        response = await self._api_get(
+            path_url=path_url, limit_id=CONSTANTS.MARKET_STATS
+        )
+        price: float = response.get("current_price") or 0.0
+        return float(Decimal(price) * price_factor)
 
     async def _trading_pair_position_mode_set(
         self, mode: PositionMode, trading_pair: str
@@ -937,9 +952,3 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         if payment == Decimal("0"):
             return 0, Decimal("-1"), Decimal("-1")
         return timestamp, funding_rate, payment
-
-    @staticmethod
-    def is_order_not_active(e: Exception) -> bool:
-        if CONSTANTS.ORDER_NOT_ACTIVE_MSG in str(e):
-            return True
-        return False

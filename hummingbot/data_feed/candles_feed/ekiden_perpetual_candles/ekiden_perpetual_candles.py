@@ -17,6 +17,7 @@ class EkidenPerpetualCandles(CandlesBase):
         return cls._logger
 
     def __init__(self, trading_pair: str, interval: str = "1m", max_records: int = 150):
+        self.market_address = ""
         super().__init__(trading_pair, interval, max_records)
 
     @property
@@ -123,7 +124,6 @@ class EkidenPerpetualCandles(CandlesBase):
             if self._trading_pair == symbol_data["symbol"]:
                 self.market_address = symbol_data["addr"]
                 return
-        raise RuntimeError
 
     async def listen_for_subscriptions(self):
         pass  # not supported

@@ -263,8 +263,6 @@ class MarketMakingControllerBase(ControllerBase):
         levels_to_execute = self.get_levels_to_execute()
         for level_id in levels_to_execute:
             price, amount = self.get_price_and_amount(level_id)
-            if price.is_nan() or amount.is_nan():
-                continue
             executor_config = self.get_executor_config(level_id, price, amount)
             if executor_config is not None:
                 create_actions.append(CreateExecutorAction(

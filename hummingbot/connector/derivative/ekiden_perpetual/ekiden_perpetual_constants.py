@@ -97,7 +97,12 @@ WS_USER_FILL = "fill"
 PRIVATE_TOPICS = [WS_USER_ORDER, WS_USER_POSITION, WS_USER_FILL]
 
 AUTH_ERROR = {"code": "UNAUTHORIZED", "message": "Unauthorized"}
-ORDER_NOT_ACTIVE_MSG = "status is not active, cannot be cancelled"
+ORDER_NOT_ACTIVE = {
+    "code": "NOT_ACTIVE",
+    "message": "status is not active, cannot be cancelled",
+}
+ORDER_NOT_FOUND = {"code": "NOT_FOUND", "message": "Not found: Order {sid} not found"}
+
 
 HEARTBEAT_TIME_INTERVAL = 20.0
 FUNDING_INTERVAL_SECONDS = 3600
