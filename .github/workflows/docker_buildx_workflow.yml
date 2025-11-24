@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build_master:
-    if: github.base_ref == 'master'
+    if: github.base_ref == 'master' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
