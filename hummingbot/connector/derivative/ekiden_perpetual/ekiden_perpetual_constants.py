@@ -1,4 +1,7 @@
+import re
 from enum import Enum
+
+from attr import dataclass
 
 from hummingbot.core.api_throttler.data_types import LinkedLimitWeightPair, RateLimit
 from hummingbot.core.data_type.in_flight_order import OrderState
@@ -75,6 +78,13 @@ class OrderTypeString(Enum):
     MARKET = "market"
 
 
+@dataclass
+class error_payload:
+    code: str
+    message: str
+    sid: str
+
+
 ORDER_STATUSES = {
     "created": OrderState.OPEN,
     "placed": OrderState.OPEN,
@@ -98,11 +108,12 @@ PRIVATE_TOPICS = [WS_USER_ORDER, WS_USER_POSITION, WS_USER_FILL]
 
 AUTH_ERROR = {"code": "UNAUTHORIZED", "message": "Unauthorized"}
 ORDER_NOT_ACTIVE = {
-    "code": "NOT_ACTIVE",
-    "message": "status is not active, cannot be cancelled",
+    "code": "BAD_REQUEST",
+    "message": "Bad request: Order {sid} status is not active, cannot be cancelled",
 }
 ORDER_NOT_FOUND = {"code": "NOT_FOUND", "message": "Not found: Order {sid} not found"}
 
+SID_REGEX = re.compile(r"\b[a-f0-9]{64}\b")
 
 HEARTBEAT_TIME_INTERVAL = 20.0
 FUNDING_INTERVAL_SECONDS = 3600

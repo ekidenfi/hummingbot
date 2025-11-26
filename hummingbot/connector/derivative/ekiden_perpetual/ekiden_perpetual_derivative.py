@@ -19,6 +19,7 @@ from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_constants
     OrderSide,
     OrderTypeString,
     TimeInForce,
+    error_payload,
 )
 from hummingbot.connector.derivative.ekiden_perpetual.ekiden_perpetual_user_stream_data_source import (
     EkidenPerpetualUserStreamDataSource,
@@ -157,7 +158,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     @property
     def is_cancel_request_in_exchange_synchronous(self) -> bool:
-        return False
+        return True
 
     @property
     def is_trading_required(self) -> bool:
@@ -210,29 +211,50 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def _is_order_not_found_during_status_update_error(
         self, status_update_exception: Exception
     ) -> bool:
-        code = self.extract_error_code(status_update_exception)
-        return code == CONSTANTS.ORDER_NOT_FOUND["code"]
+        err = self.extract_error(status_update_exception)
+        return (
+            err.code == CONSTANTS.ORDER_NOT_FOUND["code"]
+            and CONSTANTS.ORDER_NOT_FOUND["message"].format(sid=err.sid) == err.message
+        )
 
     def _is_order_not_found_during_cancelation_error(
         self, cancelation_exception: Exception
     ) -> bool:
-        code = self.extract_error_code(cancelation_exception)
-        return code in {
-            CONSTANTS.ORDER_NOT_ACTIVE["code"],
-            CONSTANTS.ORDER_NOT_FOUND["code"],
-        }
+        err = self.extract_error(cancelation_exception)
+        if err.code == CONSTANTS.ORDER_NOT_ACTIVE["code"]:
+            return (
+                err.message
+                == CONSTANTS.ORDER_NOT_ACTIVE["message"].format(sid=err.sid)
+            )
+        if err.code == CONSTANTS.ORDER_NOT_FOUND["code"]:
+            return (
+                err.message
+                == CONSTANTS.ORDER_NOT_FOUND["message"].format(sid=err.sid)
+            )
+        return False
 
     @staticmethod
-    def extract_error_code(exc: Exception) -> str | None:
+    def extract_error(exc: Exception) -> error_payload:
         msg = str(exc)
         try:
-            json_part = msg[msg.index("{"): msg.rindex("}") + 1]
-            obj = json.loads(json_part)
-            return obj.get("code")
-        except Exception:
-            return None
+            json_start = msg.index("{")
+            json_end = msg.rindex("}") + 1
+            data = json.loads(msg[json_start:json_end])
+            code = data.get("code")
+            message = data.get("message")
+            sid_match = CONSTANTS.SID_REGEX.search(message)
+            sid = sid_match.group(0)
+        except Exception as e:
+            raise ValueError(f"Invalid error format: {e}")
+        return error_payload(
+            code=code,
+            message=message,
+            sid=sid,
+        )
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
+        if not tracked_order.exchange_order_id:
+            raise ValueError("Unable to cancel without exchange id")
         nonce = self._nonce_provider.get_tracking_nonce()
         payload = {
             "type": IntentType.ORDER_CANCEL.value,
@@ -252,21 +274,14 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             data=data,
             is_auth_required=True,
         )
-        try:
-            output = cancel_result.get("output")
-            if not output or "outputs" not in output:
-                raise IOError(f"Unexpected cancel response format: {cancel_result}")
-            sid = output["outputs"][0].get("sid")
-            if not sid:
-                self.logger().debug(
-                    f"Cancel failed for order {order_id}: no SID returned"
-                )
-                raise IOError(f"Cancel failed: no SID returned for order {order_id}")
-            self.logger().info(f"Order {order_id} cancelled successfully (SID={sid})")
-            return True
-        except Exception as e:
-            self.logger().exception(f"Error parsing cancel response: {e}")
-            raise IOError(f"Cancel request failed: {e}")
+        output = cancel_result.get("output")
+        if not output or "outputs" not in output or not output["outputs"]:
+            raise IOError(f"Unexpected cancel response: {cancel_result}")
+        cancel_output = output["outputs"][0]
+        sid = cancel_output.get("sid")
+        if not sid:
+            raise IOError(f"Missing SID in cancel response: {cancel_result}")
+        return True
 
     async def _place_order(
         self,
@@ -281,7 +296,8 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     ) -> Tuple[str, float]:
         market_addr = await self.market_address_associated_to_pair(trading_pair)
         is_buy = trade_type is TradeType.BUY
-        is_reduce = position_action == PositionAction.CLOSE
+        # TODO: reduce_only disabled - Ekiden rejects these orders (timing/settlement issue)
+        is_reduce = False
         nonce = self._nonce_provider.get_tracking_nonce()
         tif = TimeInForce.GTC
         if order_type is OrderType.MARKET:
@@ -293,18 +309,21 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         )
         trading_rule = self.trading_rules[trading_pair]
         price_factor, amount_factor = get_scale_factors(trading_rule)
+        leverage = self.get_leverage(trading_pair)
+        order_size = int(amount * amount_factor)
+        order_price = int(price * price_factor)
         payload = {
             "type": IntentType.ORDER_CREATE.value,
             "orders": [
                 {
                     "is_cross": True,
-                    "leverage": 1,
+                    "leverage": leverage,
                     "market_addr": market_addr,
                     "order-link-id": order_id,
-                    "price": int(price * price_factor),
+                    "price": order_price,
                     "reduce_only": is_reduce,
                     "side": OrderSide.BUY.value if is_buy else OrderSide.SELL.value,
-                    "size": int(amount * amount_factor),
+                    "size": order_size,
                     "time_in_force": tif.value,
                     "type": o_type,
                 }
@@ -324,18 +343,18 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             data=data,
             is_auth_required=True,
         )
-        try:
-            output = order_result.get("output")
-            if not output or "outputs" not in output or not output["outputs"]:
-                raise IOError(f"Unexpected order response: {order_result}")
-            sid = output["outputs"][0].get("sid")
-            if not sid:
-                raise IOError(f"Missing order SID in response: {order_result}")
-            self.logger().info(f"Order {order_id} placed successfully (SID={sid})")
-            return sid, self.current_timestamp
-        except Exception as e:
-            self.logger().exception(f"Order placement failed: {e}")
-            raise IOError(f"Order placement failed: {e}")
+        output = order_result.get("output")
+        if not output or "outputs" not in output or not output["outputs"]:
+            raise IOError(f"Unexpected order response: {order_result}")
+        order_output = output["outputs"][0]
+        sid = order_output.get("sid")
+        if not sid:
+            raise IOError(f"Missing order SID in response: {order_result}")
+        status = order_output.get("status", "")
+        if status.lower() in ("rejected", "cancelled"):
+            raise IOError(f"Order rejected by exchange: {order_output}")
+        self.logger().info(f"Order {order_id} placed (SID={sid})")
+        return sid, self.current_timestamp
 
     def _get_fee(
         self,
@@ -435,9 +454,13 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         Updates in-flight order and triggers cancellation or failure event if needed.
         :param order_msg: The order event message payload
         """
-        order_status = CONSTANTS.ORDER_STATUSES[order_data["status"]]
+        raw_status = order_data["status"]
+        order_status = CONSTANTS.ORDER_STATUSES.get(raw_status)
+        if order_status is None:
+            self.logger().warning(f"Unknown order status: {raw_status}")
+            return
         exch_order_id = order_data["sid"]
-        client_order_id = order_data.get("order-link-id", None)
+        client_order_id = order_data.get("order_link_id") or order_data.get("order-link-id")
         if client_order_id:
             updatable_order = self._order_tracker.all_updatable_orders.get(
                 client_order_id
@@ -454,7 +477,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 trading_pair=updatable_order.trading_pair,
                 update_timestamp=self.current_timestamp,
                 new_state=order_status,
-                client_order_id=client_order_id,
+                client_order_id=updatable_order.client_order_id,
                 exchange_order_id=exch_order_id,
             )
             self._order_tracker.process_order_update(new_order_update)
@@ -594,7 +617,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                         for order_msg in results:
                             self._process_order_message(order_msg)
                     case CONSTANTS.WS_USER_FILL:
-                        for trade_msg in results["fills"]:
+                        for trade_msg in results:
                             self._process_trade_message(trade_msg)
                     case CONSTANTS.WS_USER_POSITION:
                         for position_msg in results:
@@ -612,9 +635,13 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         Updates in-flight order and triggers cancellation or failure event if needed.
         :param order_msg: The order event message payload
         """
-        order_status = CONSTANTS.ORDER_STATUSES[order_msg["status"]]
+        raw_status = order_msg["status"]
+        order_status = CONSTANTS.ORDER_STATUSES.get(raw_status)
+        if order_status is None:
+            self.logger().warning(f"Unknown order status: {raw_status}")
+            return
         exch_order_id = order_msg["sid"]
-        client_order_id = order_msg.get("order-link-id", None)
+        client_order_id = order_msg.get("order_link_id") or order_msg.get("order-link-id")
         if client_order_id:
             updatable_order = self._order_tracker.all_updatable_orders.get(
                 client_order_id
@@ -631,7 +658,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 trading_pair=updatable_order.trading_pair,
                 update_timestamp=self.current_timestamp,
                 new_state=order_status,
-                client_order_id=client_order_id,
+                client_order_id=updatable_order.client_order_id,
                 exchange_order_id=exch_order_id,
             )
             self._order_tracker.process_order_update(new_order_update)
@@ -644,7 +671,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         :param trade_msg: The trade event message payload
         """
 
-        client_order_id = trade_msg.get("order-link-id")
+        client_order_id = trade_msg.get("order_link_id") or trade_msg.get("order-link-id")
         fillable_order = None
 
         if client_order_id:
@@ -726,6 +753,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             fill_base_amount=exec_base_amount,
             fill_quote_amount=exec_quote_amount,
             fee=fee,
+            is_taker=not is_maker
         )
         return trade_update
 

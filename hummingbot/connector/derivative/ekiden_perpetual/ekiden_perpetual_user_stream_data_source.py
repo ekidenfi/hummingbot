@@ -80,13 +80,13 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         :param ws: the websocket assistant used to connect to the exchange
         """
         try:
-            orders_change_payload = {
+            orders_payload = {
                 "op": "subscribe",
                 "args": ["order"],
                 "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
             }
-            subscribe_order_change_request: WSJSONRequest = WSJSONRequest(
-                payload=orders_change_payload
+            subscribe_orders_request: WSJSONRequest = WSJSONRequest(
+                payload=orders_payload
             )
             positions_payload = {
                 "op": "subscribe",
@@ -96,10 +96,19 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             subscribe_positions_request: WSJSONRequest = WSJSONRequest(
                 payload=positions_payload
             )
-            await websocket_assistant.send(subscribe_order_change_request)
+            fills_payload = {
+                "op": "subscribe",
+                "args": ["fill"],
+                "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
+            }
+            subscribe_fills_request: WSJSONRequest = WSJSONRequest(
+                payload=fills_payload
+            )
+            await websocket_assistant.send(subscribe_orders_request)
             await websocket_assistant.send(subscribe_positions_request)
+            await websocket_assistant.send(subscribe_fills_request)
             self.logger().info(
-                "Subscribed to private order and trades changes channels..."
+                "Subscribed to private orders, trades and fills channels..."
             )
         except asyncio.CancelledError:
             raise

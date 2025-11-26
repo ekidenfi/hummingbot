@@ -50,15 +50,20 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         unix_ts = dt.timestamp()
         unix_ts_ms = int(unix_ts * 1000)
-        scaled_oracle_p = response["oracle_price"] / CONSTANTS.CURRENCY_DECIMALS
-        scaled_mark_p = response["mark_price"] / CONSTANTS.CURRENCY_DECIMALS
+        trading_rule = self._connector.trading_rules[trading_pair]
+        price_factor, _ = get_scale_factors(trading_rule, inverse=True)
+
+        scaled_oracle_p = response["oracle_price"] * price_factor
+        scaled_mark_p = response["mark_price"] * price_factor
+
+        rate = Decimal(response["funding_rate_percentage"])
 
         funding_info = FundingInfo(
             trading_pair=trading_pair,
-            index_price=Decimal(scaled_oracle_p),
-            mark_price=Decimal(scaled_mark_p),
+            index_price=scaled_oracle_p,
+            mark_price=scaled_mark_p,
             next_funding_utc_timestamp=unix_ts_ms,
-            rate=Decimal(response["funding_rate_raw"]),
+            rate=rate,
         )
         return funding_info
 
@@ -195,9 +200,12 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         trading_pair = await self._connector.trading_pair_associated_to_market_address(
             raw_message["data"]["market_addr"]
         )
+        trading_rule = self._connector.trading_rules[trading_pair]
+        price_factor, amount_factor = get_scale_factors(trading_rule, inverse=True)
 
         for trade in trades:
-            scaled_price = trade["price"] / CONSTANTS.CURRENCY_DECIMALS
+            scaled_price = trade["price"] * price_factor
+            scaled_size = trade["size"] * amount_factor
             trade_message: OrderBookMessage = OrderBookMessage(
                 OrderBookMessageType.TRADE,
                 {
@@ -209,7 +217,7 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
                     ),
                     "trade_id": trade["id"],
                     "price": float(scaled_price),
-                    "amount": float(trade["size"]),
+                    "amount": float(scaled_size),
                 },
                 timestamp=trade["timestamp"] * 1e-3,
             )
@@ -223,14 +231,16 @@ class EkidenPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         trading_pair = await self._connector.trading_pair_associated_to_market_address(
             data["market_addr"]
         )
+        trading_rule = self._connector.trading_rules[trading_pair]
+        price_factor, _ = get_scale_factors(trading_rule, inverse=True)
 
-        scaled_index_p = data["index_price"] / CONSTANTS.CURRENCY_DECIMALS
-        scaled_mark_p = data["mark_price"] / CONSTANTS.CURRENCY_DECIMALS
+        scaled_index_p = data["index_price"] * price_factor
+        scaled_mark_p = data["mark_price"] * price_factor
 
         funding_info_update = FundingInfoUpdate(
             trading_pair=trading_pair,
-            index_price=Decimal(scaled_index_p),
-            mark_price=Decimal(scaled_mark_p),
+            index_price=scaled_index_p,
+            mark_price=scaled_mark_p,
             next_funding_utc_timestamp=data["next_funding_time"],
             rate=Decimal(data["funding_rate"]),
         )

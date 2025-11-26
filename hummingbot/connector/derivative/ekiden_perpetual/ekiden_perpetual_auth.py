@@ -94,5 +94,5 @@ class EkidenPerpetualAuth(AuthBase):
         derived_pk = f"ed25519-priv-0x{derived_seed32.hex()}"
 
         self.trading_account = Account.load_key(derived_pk)
-        self.trading_address = str(self.trading_account.address)
+        self.trading_address = str(self.trading_account.address())
         self.pub_key = str(self.trading_account.public_key())
