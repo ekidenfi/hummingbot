@@ -2,7 +2,7 @@ import base64
 import json
 import secrets
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiohttp import ClientSession
 from aptos_sdk.account import Account
@@ -22,11 +22,8 @@ class EkidenPerpetualAuth(AuthBase):
         self._root_account = self.initialize_account(
             aptos_private_key, is_trading_required
         )
-        self.trading_account: Optional[Account] = None
-        self.trading_address: Optional[str] = None
-        self.pub_key: Optional[str] = None
+        self.trading_account, self.trading_address = self.derive_trading_acc()
         self._token: Optional[str] = None
-        self.derive_trading_acc()
 
     # TODO: Add auth error handling and token refetching
     async def rest_authenticate(self, request: RESTRequest) -> RESTRequest:
@@ -52,7 +49,7 @@ class EkidenPerpetualAuth(AuthBase):
         signature = str(self.trading_account.sign(message))
 
         payload = {
-            "public_key": self.pub_key,
+            "public_key": str(self.trading_account.public_key()),
             "timestamp_ms": timestamp_ms,
             "nonce": nonce_b64url,
             "signature": signature,
@@ -69,7 +66,9 @@ class EkidenPerpetualAuth(AuthBase):
             response = await connection.call(request)
             json_resp = await response.json()
 
-        token = json_resp.get("token")
+        token: str = json_resp.get("token")
+        if not token:
+            raise ValueError("No token in ekiden's auth response")
         self._token = token
         return self._token
 
@@ -84,15 +83,15 @@ class EkidenPerpetualAuth(AuthBase):
             case _:
                 return Account.load_key(aptos_private_key)
 
-    def derive_trading_acc(self, nonce: int = 0) -> None:
+    def derive_trading_acc(self, nonce: int = 0) -> Tuple[Account, str]:
         DERIVATION_PREFIX = "APTOS\nmessage: Ekiden Trading\nnonce: "
-        root_pub_key = str(self._root_account.account_address)
-        msg = f"{DERIVATION_PREFIX}{root_pub_key.lower()}Tradingv2{nonce}"
+        root_addr = str(self._root_account.account_address)
+        msg = f"{DERIVATION_PREFIX}{root_addr.lower()}Tradingv2{nonce}"
 
         sig_hex = str(self._root_account.sign(msg.encode())).replace("0x", "")
         derived_seed32 = bytes.fromhex(sig_hex)[:32]
         derived_pk = f"ed25519-priv-0x{derived_seed32.hex()}"
 
-        self.trading_account = Account.load_key(derived_pk)
-        self.trading_address = str(self.trading_account.address())
-        self.pub_key = str(self.trading_account.public_key())
+        trading_account = Account.load_key(derived_pk)
+        trading_address = str(trading_account.account_address)
+        return (trading_account, trading_address)
