@@ -46,10 +46,10 @@ class EkidenPerpetualAuth(AuthBase):
             base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
         )
         message = f"AUTHORIZE|{timestamp_ms}|{nonce_b64url}".encode()
-        signature = str(self.trading_account.sign(message))
+        signature = str(self._root_account.sign(message))
 
         payload = {
-            "public_key": str(self.trading_account.public_key()),
+            "public_key": str(self._root_account.public_key()),
             "timestamp_ms": timestamp_ms,
             "nonce": nonce_b64url,
             "signature": signature,

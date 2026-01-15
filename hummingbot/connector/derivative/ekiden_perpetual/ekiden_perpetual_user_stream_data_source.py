@@ -82,7 +82,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
         try:
             orders_payload = {
                 "op": "subscribe",
-                "args": ["order"],
+                "args": [CONSTANTS.WS_USER_ORDER],
                 "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
             }
             subscribe_orders_request: WSJSONRequest = WSJSONRequest(
@@ -90,7 +90,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             )
             positions_payload = {
                 "op": "subscribe",
-                "args": ["position"],
+                "args": [CONSTANTS.WS_USER_POSITION],
                 "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
             }
             subscribe_positions_request: WSJSONRequest = WSJSONRequest(
@@ -98,7 +98,7 @@ class EkidenPerpetualUserStreamDataSource(UserStreamTrackerDataSource):
             )
             fills_payload = {
                 "op": "subscribe",
-                "args": ["fill"],
+                "args": [CONSTANTS.WS_USER_FILL],
                 "req_id": f"{self._nonce_provider.get_tracking_nonce()}",
             }
             subscribe_fills_request: WSJSONRequest = WSJSONRequest(
