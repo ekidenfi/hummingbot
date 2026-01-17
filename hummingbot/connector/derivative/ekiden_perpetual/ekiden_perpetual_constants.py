@@ -31,12 +31,6 @@ POSITION_SET_LEVERAGE = "/position/set-leverage"
 
 ACCOUNT_BALANCE = "/account/balance"
 
-USER_SUBACCOUNTS = "/user/accounts/owned"
-USER_ACCOUNT_OWNER = "/user/accounts/owner"
-USER_FILLS = "/user/fills"
-USER_VAULTS = "/user/vaults"
-USER_WITHDRAW_TO_FUNDING = "/user/vaults/withdraw"
-
 WS_PUBLIC = "/public"
 WS_PRIVATE = "/private"
 
@@ -185,36 +179,6 @@ RATE_LIMITS = [
     ),
     RateLimit(
         ACCOUNT_BALANCE,
-        limit=MAX_REQUEST,
-        time_interval=60,
-        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
-    ),
-    RateLimit(
-        USER_SUBACCOUNTS,
-        limit=MAX_REQUEST,
-        time_interval=60,
-        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
-    ),
-    RateLimit(
-        USER_ACCOUNT_OWNER,
-        limit=MAX_REQUEST,
-        time_interval=60,
-        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
-    ),
-    RateLimit(
-        USER_FILLS,
-        limit=MAX_REQUEST,
-        time_interval=60,
-        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
-    ),
-    RateLimit(
-        USER_VAULTS,
-        limit=MAX_REQUEST,
-        time_interval=60,
-        linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
-    ),
-    RateLimit(
-        USER_WITHDRAW_TO_FUNDING,
         limit=MAX_REQUEST,
         time_interval=60,
         linked_limits=[LinkedLimitWeightPair(ALL_ENDPOINTS_LIMIT, 1)],
