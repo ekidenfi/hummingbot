@@ -57,7 +57,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._last_trade_history_timestamp = None
         self._nonce_provider = NonceCreator.for_microseconds()
         self._initialized_rules = False
-        self._vault_address: Optional[str] = None
+        self._sub_account_address: Optional[str] = None
         super().__init__(balance_asset_limit, rate_limits_share_pct)
 
     @property
@@ -225,7 +225,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         return False
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             raise ValueError("Vault address not available, cannot cancel order")
         exchange_symbol = await self.exchange_symbol_associated_to_pair(
             tracked_order.trading_pair
@@ -234,7 +234,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             "symbol": exchange_symbol,
             "order_id": tracked_order.exchange_order_id,
             "order_link_id": tracked_order.client_order_id,
-            "vault_address": self._vault_address,
+            "sub_account_address": self._sub_account_address,
         }
         cancel_response = await self._api_post(
             path_url=CONSTANTS.ORDER_CANCEL,
@@ -254,7 +254,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         position_action: PositionAction = PositionAction.NIL,
         **kwargs,
     ) -> Tuple[str, float]:
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             raise ValueError("Vault address not available, cannot place order")
 
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
@@ -280,7 +280,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             "reduce_only": position_action is PositionAction.CLOSE,
             "close_on_trigger": False,
             "order_link_id": order_id,
-            "vault_address": self._vault_address,
+            "sub_account_address": self._sub_account_address,
             "expire_time": None,
         }
 
@@ -359,11 +359,11 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         orders = list(self._order_tracker.all_fillable_orders.values())
         if len(orders) > 0:
             try:
-                if not await self._ensure_vault_address():
+                if not await self._ensure_sub_account_address():
                     return
                 all_fills_response: List[Dict[str, Any]] = await self._api_get(
                     path_url=CONSTANTS.EXECUTION_LIST,
-                    params={"vault_address": self._vault_address},
+                    params={"sub_account_address": self._sub_account_address},
                     is_auth_required=True,
                 )
                 fills_list = all_fills_response.get("list", [])
@@ -382,13 +382,13 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         if len(open_orders) == 0:
             return
 
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             return
 
         try:
             order_list_response = await self._api_get(
                 path_url=CONSTANTS.ORDER_REALTIME,
-                params={"vault_address": self._vault_address},
+                params={"sub_account_address": self._sub_account_address},
                 is_auth_required=True,
             )
             orders = order_list_response.get("list", [])
@@ -422,10 +422,10 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             )
             self._order_tracker.process_order_update(new_order_update)
 
-    async def _ensure_vault_address(self) -> bool:
-        if self._vault_address is None:
+    async def _ensure_sub_account_address(self) -> bool:
+        if self._sub_account_address is None:
             await self._update_balances()
-            if self._vault_address is None:
+            if self._sub_account_address is None:
                 return False
         return True
 
@@ -441,13 +441,13 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             )
 
             available_balance = Decimal(balance_data.get("available_balance", "0"))
-            wallet_balance = Decimal(balance_data.get("wallet_balance", "0"))
-            self._vault_address = balance_data.get("user_addr")
+            vault_balance = Decimal(balance_data.get("vault_balance", "0"))
+            self._sub_account_address = balance_data.get("sub_account_address")
 
             self._account_available_balances.clear()
             self._account_balances.clear()
 
-            self._account_balances[CONSTANTS.CURRENCY] = wallet_balance
+            self._account_balances[CONSTANTS.CURRENCY] = vault_balance
             self._account_available_balances[CONSTANTS.CURRENCY] = available_balance
         except asyncio.CancelledError:
             raise
@@ -462,14 +462,14 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     async def _update_positions(self):
         try:
-            if not await self._ensure_vault_address():
+            if not await self._ensure_sub_account_address():
                 self.logger().warning(
                     "Vault address not available, cannot fetch positions"
                 )
                 return
             position_response = await self._api_get(
                 path_url=CONSTANTS.POSITION_LIST,
-                params={"vault_address": self._vault_address},
+                params={"sub_account_address": self._sub_account_address},
                 is_auth_required=True,
             )
             positions = position_response.get("list", [])
@@ -532,14 +532,14 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         return trade_updates
 
     async def _request_order_fills(self, order: InFlightOrder) -> Dict[str, Any]:
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             raise ValueError("Vault address not available, cannot request order fills")
 
         exchange_symbol = await self.exchange_symbol_associated_to_pair(
             order.trading_pair
         )
         params = {
-            "vault_address": self._vault_address,
+            "sub_account_address": self._sub_account_address,
             "symbol": exchange_symbol,
             "order_id": order.exchange_order_id,
         }
@@ -594,7 +594,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             "symbol": exchange_symbol,
             "order_id": tracked_order.exchange_order_id,
             "order_link_id": tracked_order.client_order_id,
-            "vault_address": self._vault_address,
+            "sub_account_address": self._sub_account_address,
         }
         order_list_response = await self._api_get(
             path_url=CONSTANTS.ORDER_REALTIME,
@@ -882,13 +882,13 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     async def _set_trading_pair_leverage(
         self, trading_pair: str, leverage: int
     ) -> Tuple[bool, str]:
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             return False, "Vault address not available"
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
         set_leverage_request = {
             "symbol": exchange_symbol,
             "leverage": str(leverage),
-            "vault_address": self._vault_address,
+            "sub_account_address": self._sub_account_address,
         }
         try:
             set_leverage_response = await self._api_post(
@@ -911,12 +911,12 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     async def _fetch_last_fee_payment(
         self, trading_pair: str
     ) -> Tuple[int, Decimal, Decimal]:
-        if not await self._ensure_vault_address():
+        if not await self._ensure_sub_account_address():
             return 0, s_decimal_0, s_decimal_0
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
         position_response = await self._api_get(
             path_url=CONSTANTS.POSITION_LIST,
-            params={"symbol": exchange_symbol, "vault_address": self._vault_address},
+            params={"symbol": exchange_symbol, "sub_account_address": self._sub_account_address},
             is_auth_required=True,
         )
         positions = position_response.get("list", [])
