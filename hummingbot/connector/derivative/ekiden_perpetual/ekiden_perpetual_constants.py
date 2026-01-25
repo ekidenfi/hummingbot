@@ -81,7 +81,8 @@ ORDER_STATUSES = {
     "New": OrderState.OPEN,
     "PartiallyFilled": OrderState.PARTIALLY_FILLED,
     "Filled": OrderState.FILLED,
-    "CancelRequested": OrderState.CANCELED,
+    "CancelRequested": OrderState.PENDING_CANCEL,
+    "Canceled": OrderState.CANCELED,
     "Rejected": OrderState.FAILED,
     "PartiallyFilledAndCancelled": OrderState.PARTIALLY_FILLED,
 }

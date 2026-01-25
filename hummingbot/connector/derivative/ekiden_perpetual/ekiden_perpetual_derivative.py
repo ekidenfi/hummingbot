@@ -1,4 +1,5 @@
 import asyncio
+import time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,7 +25,7 @@ from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativ
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import combine_to_hb_trading_pair, split_hb_trading_pair
 from hummingbot.core.api_throttler.data_types import RateLimit
-from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PositionSide, TradeType
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PositionSide, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.perpetual_api_order_book_data_source import PerpetualAPIOrderBookDataSource
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeBase
@@ -58,6 +59,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._nonce_provider = NonceCreator.for_microseconds()
         self._initialized_rules = False
         self._sub_account_address: Optional[str] = None
+        self._last_empty_orderbook_warning: Dict[str, float] = {}
         super().__init__(balance_asset_limit, rate_limits_share_pct)
 
     @property
@@ -113,33 +115,6 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
             path_url=CONSTANTS.HEALTH_URL,
         )
 
-    # async def market_address_associated_to_pair(self, trading_pair: str) -> str:
-    #     """
-    #     Used to translate a trading pair from the client notation to the exchange market address
-
-    #     :param trading_pair: trading pair in client notation
-
-    #     :return: market address
-    #     """
-    #     if getattr(self, "market_addresses_trading_pair_map", None):
-    #         address_map = self.market_addresses_trading_pair_map
-    #         return address_map.inverse[trading_pair]
-
-    # async def trading_pair_associated_to_market_address(
-    #     self,
-    #     market_address: str,
-    # ) -> Optional[str]:
-    #     """
-    #     Used to translate a trading pair from the exchange market address
-
-    #     :param market_address: market address from exchange
-
-    #     :return: trading pair in client notation
-    #     """
-    #     if getattr(self, "market_addresses_trading_pair_map", None):
-    #         address_map = self.market_addresses_trading_pair_map
-    #         return address_map[market_address]
-
     @property
     def check_network_request_path(self) -> str:
         return CONSTANTS.HEALTH_URL
@@ -150,7 +125,7 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
 
     @property
     def is_cancel_request_in_exchange_synchronous(self) -> bool:
-        return True
+        return False
 
     @property
     def is_trading_required(self) -> bool:
@@ -190,9 +165,6 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         self._initialize_trading_pair_symbols_from_exchange_info(
             exchange_info=exchange_info
         )
-        # self._initialize_market_addresses_from_exchange_info(
-        #     exchange_info=exchange_info
-        # )
         self._initialized_rules = True
 
     def _is_request_exception_related_to_time_synchronizer(
@@ -203,25 +175,11 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
     def _is_order_not_found_during_status_update_error(
         self, status_update_exception: Exception
     ) -> bool:
-        # err = self.extract_error(status_update_exception)
-        # return (
-        #     err.code == CONSTANTS.ORDER_NOT_FOUND["code"]
-        #     and CONSTANTS.ORDER_NOT_FOUND["message"].format(sid=err.sid) == err.message
-        # )
         return False
 
     def _is_order_not_found_during_cancelation_error(
         self, cancelation_exception: Exception
     ) -> bool:
-        # err = self.extract_error(cancelation_exception)
-        # if err.code == CONSTANTS.ORDER_NOT_ACTIVE["code"]:
-        #     return err.message == CONSTANTS.ORDER_NOT_ACTIVE["message"].format(
-        #         sid=err.sid
-        #     )
-        # if err.code == CONSTANTS.ORDER_NOT_FOUND["code"]:
-        #     return err.message == CONSTANTS.ORDER_NOT_FOUND["message"].format(
-        #         sid=err.sid
-        #     )
         return False
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
@@ -810,26 +768,6 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
                 mapping[exchange_symbol] = trading_pair
         self._set_trading_pair_symbol_map(mapping)
 
-    # def _initialize_market_addresses_from_exchange_info(
-    #     self, exchange_info: Dict[str, Any]
-    # ):
-    #     if not exchange_info.get("list"):
-    #         raise ValueError("Exchange info is not valid")
-    #     else:
-    #         exchange_info = exchange_info.get("list")
-    #     mapping = bidict()
-    #     for symbol_data in exchange_info:
-    #         exchange_symbol = symbol_data["symbol"]
-    #         market_address = symbol_data["addr"]
-    #         base, quote = exchange_symbol.split("-")
-    #         trading_pair = combine_to_hb_trading_pair(base, quote)
-    #         if trading_pair in mapping.inverse:
-    #             self._resolve_trading_pair_symbols_duplicate(
-    #                 mapping, exchange_symbol, base, quote
-    #             )
-    #         mapping[market_address] = trading_pair
-    #     self.market_addresses_trading_pair_map = mapping
-
     def _resolve_trading_pair_symbols_duplicate(
         self, mapping: bidict, new_exchange_symbol: str, base: str, quote: str
     ):
@@ -916,7 +854,10 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         exchange_symbol = await self.exchange_symbol_associated_to_pair(trading_pair)
         position_response = await self._api_get(
             path_url=CONSTANTS.POSITION_LIST,
-            params={"symbol": exchange_symbol, "sub_account_address": self._sub_account_address},
+            params={
+                "symbol": exchange_symbol,
+                "sub_account_address": self._sub_account_address,
+            },
             is_auth_required=True,
         )
         positions = position_response.get("list", [])
@@ -934,3 +875,76 @@ class EkidenPerpetualDerivative(PerpetualDerivativePyBase):
         realized_pnl_cum = Decimal(realized_pnl_cum_str)
 
         return updated_time, unrealized_funding, realized_pnl_cum
+
+    def get_price(self, trading_pair: str, is_buy: bool) -> Decimal:
+        """
+        Override get_price to use mark price when orderbook is empty.
+        """
+        try:
+            order_book = self.get_order_book(trading_pair)
+            if is_buy:
+                ask_entries = list(order_book.ask_entries())
+                if not ask_entries:
+                    return self._get_price_from_mark_price(trading_pair, is_buy)
+            else:
+                bid_entries = list(order_book.bid_entries())
+                if not bid_entries:
+                    return self._get_price_from_mark_price(trading_pair, is_buy)
+
+            return super().get_price(trading_pair, is_buy)
+        except (ValueError, KeyError):
+            return self._get_price_from_mark_price(trading_pair, is_buy)
+        except Exception:
+            return super().get_price(trading_pair, is_buy)
+
+    def get_price_by_type(self, trading_pair: str, price_type: PriceType) -> Decimal:
+        """
+        Override get_price_by_type to use mark price when orderbook is empty.
+        """
+        if price_type is PriceType.BestBid:
+            return self.get_price(trading_pair, False)
+        elif price_type is PriceType.BestAsk:
+            return self.get_price(trading_pair, True)
+        elif price_type is PriceType.MidPrice:
+            bid_price = self.get_price(trading_pair, False)
+            ask_price = self.get_price(trading_pair, True)
+            return (bid_price + ask_price) / Decimal("2")
+        elif price_type is PriceType.LastTrade:
+            try:
+                order_book = self.get_order_book(trading_pair)
+                return Decimal(order_book.last_trade_price)
+            except (ValueError, KeyError):
+                try:
+                    funding_info = self.get_funding_info(trading_pair)
+                    if funding_info and funding_info.mark_price:
+                        return Decimal(str(funding_info.mark_price))
+                except Exception:
+                    pass
+                return super().get_price_by_type(trading_pair, price_type)
+        else:
+            return super().get_price_by_type(trading_pair, price_type)
+
+    def _get_price_from_mark_price(self, trading_pair: str, is_buy: bool) -> Decimal:
+        current_time = time.time()
+        warning_key = f"{trading_pair}_{is_buy}"
+        last_warning_time = self._last_empty_orderbook_warning.get(warning_key, 0)
+
+        if current_time - last_warning_time > 60:
+            self.logger().debug(
+                f"{'Ask' if is_buy else 'Bid'} orderbook for {trading_pair} is empty. "
+                f"Using mark price for order placement."
+            )
+            self._last_empty_orderbook_warning[warning_key] = current_time
+
+        try:
+            funding_info = self.get_funding_info(trading_pair)
+            if funding_info and funding_info.mark_price:
+                mark_price = Decimal(str(funding_info.mark_price))
+                return self.quantize_order_price(trading_pair, mark_price)
+        except Exception as e:
+            self.logger().debug(
+                f"Could not get mark price for {trading_pair}: {e}. "
+                f"Falling back to base implementation."
+            )
+
+        return super().get_price(trading_pair, is_buy)

@@ -45,14 +45,15 @@ class EkidenPerpetualAuth(AuthBase):
         nonce_b64url = (
             base64.urlsafe_b64encode(secrets.token_bytes(16)).decode().rstrip("=")
         )
-        message = f"AUTHORIZE|{timestamp_ms}|{nonce_b64url}".encode()
-        signature = str(self._root_account.sign(message))
+        full_message = f"APTOS\nmessage: AUTHORIZE|{timestamp_ms}|{nonce_b64url}\nnonce: {nonce_b64url}"
+        signature = str(self._root_account.sign(full_message.encode()))
 
         payload = {
-            "public_key": str(self._root_account.public_key()),
-            "timestamp_ms": timestamp_ms,
+            "full_message": full_message,
             "nonce": nonce_b64url,
+            "public_key": str(self._root_account.public_key()),
             "signature": signature,
+            "timestamp_ms": timestamp_ms,
         }
 
         async with ClientSession() as session:
